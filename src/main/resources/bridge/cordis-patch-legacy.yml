@@ -1,0 +1,36 @@
+# Service rows the acp composition does not carry.
+- insert:
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+    # The subagent model routing reads this host row (the web bundle
+    # ships it; the acp composition does not).
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+    - id: dsh-vscode-bridge
+      name: 'dsh-vscode-bridge'
+      # config: { portStart: 7310, portEnd: 7319 }   # optional override
+
+# Display metadata for the three permission presets (base only ships
+# sandbox/approval, no name/description).
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: read-only
+        description: Read-only; writes and wider retries require approval.
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: workspace-write
+        description: Writes inside the workspace allowed; wider retries require approval.
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: danger-full-access
+        description: Full file access; no approval prompts.

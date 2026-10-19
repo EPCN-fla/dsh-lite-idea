@@ -1,0 +1,56 @@
+<p><b>DSH Lite</b> brings the <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>
+(dsh) coding agent into your JetBrains IDE through the
+<a href="https://agentclientprotocol.com">Agent Client Protocol</a> (ACP).
+Ask questions about your project, reference files, follow tool activity, and manage agent sessions
+without leaving the editor.</p>
+
+<h2>Features</h2>
+<ul>
+  <li><b>Streaming chat:</b> Markdown replies with tables, code blocks and copy actions;
+    collapsible reasoning and tool-call cards; plan/todo display and a context-usage meter.</li>
+  <li><b>Project sessions:</b> create, list and resume conversations, restore reasoning and tool results,
+    rename or delete sessions, and export session logs as ZIP.</li>
+  <li><b>Agent controls:</b> choose a model, reasoning effort, agent preset and permission mode;
+    review permission requests in native dialogs and cancel a running turn.</li>
+  <li><b>Commands and context:</b> type / for local actions, native dsh commands and skills;
+    browse the skill catalog or use @ to reference project files.</li>
+  <li><b>Flexible runtime:</b> run dsh locally on Linux/macOS, in WSL from a Windows IDE,
+    or natively on Windows, with automatic Windows/WSL path mapping.</li>
+  <li><b>Setup and diagnostics:</b> install or repair the dsh bridge from the toolbar and
+    use Doctor to check the agent runtime and bridge connection.</li>
+  <li><b>English and Simplified Chinese</b> interface resources.</li>
+</ul>
+
+<h2>Requirements</h2>
+<ul>
+  <li>An IntelliJ Platform IDE based on <b>2024.3 (build 243) or newer</b>, such as IntelliJ IDEA,
+    PyCharm, WebStorm or GoLand. Android Studio must also meet this platform build requirement.</li>
+  <li><b>Node.js 22.19 or newer</b> and DeepSeek Harness on the machine or WSL distribution where
+    the agent runs. Install dsh with <code>npm i -g @deepseek-ai/dsh</code>, launch it through npx,
+    or use a local checkout.</li>
+  <li>A model provider configured in dsh, including any credentials required by that provider.
+    The IDE plugin does not include a model service or API credits.</li>
+  <li>The <b>dsh-vscode-bridge</b> dsh plugin enables session titles/deletion, agent presets,
+    permission modes, workspace grouping, native commands, skills and log export.
+    See the <a href="https://github.com/EPCN-fla/dsh-lite-idea#version-matching">version compatibility table</a>
+    before choosing dsh and bridge versions.</li>
+</ul>
+
+<h2>Getting started</h2>
+<ol>
+  <li>Open <b>Settings → Tools → DSH Lite for JetBrains IDE</b> and choose the runtime and dsh command.</li>
+  <li>Open the <b>DSH</b> tool window and click <b>Install Bridge</b> to create or repair the default
+    <code>acp-vscode</code> profile. The installer requires Linux, macOS or WSL;
+    native Windows users must configure the bridge separately.</li>
+  <li>Configure your model provider in dsh, or supply its API key through <b>Extra environment</b>.</li>
+  <li>Start a new session or type a prompt. Use <b>Doctor</b> if the agent does not connect.</li>
+</ol>
+<p>For basic ACP chat without the bridge, select the <code>acp</code> profile.
+Native Windows history import requires a bridge that supports session ZIP export.</p>
+
+<p><a href="https://github.com/EPCN-fla/dsh-lite-idea#readme">Documentation and troubleshooting</a> ·
+<a href="https://github.com/EPCN-fla/dsh-lite-idea/issues">Report an issue</a> ·
+<a href="https://github.com/EPCN-fla/dsh-lite-idea">Source code</a> ·
+<a href="https://github.com/EPCN-fla/dsh-lite-idea/blob/main/LICENSE">MIT License</a></p>
+<p>Also available for VS Code as
+<a href="https://github.com/EPCN-fla/dsh-lite-vscode">dsh-lite-vscode</a>.</p>

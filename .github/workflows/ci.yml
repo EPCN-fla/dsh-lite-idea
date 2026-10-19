@@ -1,0 +1,101 @@
+name: CI
+
+# PRs validate only. Branch pushes do not run CI. Version tags validate and release.
+on:
+  pull_request:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # setup-gradle also validates the Gradle wrapper JAR.
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^pluginVersion=//p' gradle.properties | tr -d '\r')
+          if [[ -z "$version" || "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match pluginVersion (v$version)."
+            exit 1
+          fi
+          if ! grep -Fq "<h2>$version —" docs/whats-new.html; then
+            echo "::error::Update docs/whats-new.html for version $version."
+            exit 1
+          fi
+      - name: Test, package and validate plugin structure
+        shell: bash
+        run: ./gradlew --no-daemon check buildPlugin verifyPluginStructure
+      - name: Verify IDE compatibility
+        if: runner.os == 'Linux'
+        run: ./gradlew --no-daemon verifyPlugin
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.os }}
+          path: |
+            build/reports/
+            build/test-results/
+          if-no-files-found: ignore
+      - name: Upload verified plugin
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-distribution
+          path: build/distributions/*.zip
+          if-no-files-found: error
+
+  marketplace:
+    name: JetBrains Marketplace
+    needs: validate
+    # Only stable version tags publish; PRs and prereleases retain CI artifacts only.
+    if: startsWith(github.ref, 'refs/tags/v') && vars.JETBRAINS_PUBLISH == 'true' && !contains(github.ref_name, '-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugin-distribution
+          path: dist
+      - name: Publish verified ZIP to JetBrains Marketplace
+        env:
+          JETBRAINS_MARKETPLACE_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
+        run: |
+          if [[ -z "$JETBRAINS_MARKETPLACE_TOKEN" ]]; then
+            echo '::error::Set the JETBRAINS_MARKETPLACE_TOKEN repository secret.'
+            exit 1
+          fi
+          archives=(dist/*.zip)
+          if [[ ${#archives[@]} -ne 1 || ! -f "${archives[0]}" ]]; then
+            echo '::error::Expected exactly one verified plugin ZIP.'
+            exit 1
+          fi
+          ./gradlew --no-daemon publishPlugin -PpluginArchive="${archives[0]}"

@@ -1,0 +1,22 @@
+<idea-plugin url="https://github.com/EPCN-fla/dsh-lite-idea">
+    <id>com.dshlite.idea</id>
+    <name>DSH Lite</name>
+    <vendor url="https://github.com/EPCN-fla">EPCN-fla</vendor>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <resource-bundle>messages.DshBundle</resource-bundle>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="DSH"
+            anchor="right"
+            factoryClass="com.dshlite.idea.ui.ChatToolWindowFactory"
+            icon="/icons/dsh.svg"/>
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.dshlite.idea.settings.DshConfigurable"
+            id="dshlite.settings"
+            displayName="DSH Lite for JetBrains IDE"/>
+    </extensions>
+</idea-plugin>
