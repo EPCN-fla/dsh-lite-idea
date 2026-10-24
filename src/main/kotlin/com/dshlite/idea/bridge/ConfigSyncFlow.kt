@@ -91,8 +91,13 @@ internal class ConfigSyncFlow(
     private val connection: ConfigSyncConnection,
     private val ui: ConfigSyncInteractions,
     private val onEdt: (() -> Unit) -> Unit,
+    private val onImported: (ConfigSyncSummary) -> Unit = {},
 ) {
-    constructor(project: Project, bridge: BridgeManager) : this(
+    constructor(
+        project: Project,
+        bridge: BridgeManager,
+        onImported: (ConfigSyncSummary) -> Unit = {},
+    ) : this(
         connection = object : ConfigSyncConnection {
             override val isOn: Boolean get() = bridge.isOn
             override val client: ConfigSyncRpc? get() = bridge.client
@@ -104,6 +109,7 @@ internal class ConfigSyncFlow(
                 if (!project.isDisposed) block()
             }, ModalityState.any())
         },
+        onImported = onImported,
     )
 
     @Volatile private var running = false
@@ -182,6 +188,7 @@ internal class ConfigSyncFlow(
             if (imported.restartRequired) add(DshBundle.message("configSync.result.restart"))
             add(DshBundle.message("configSync.result.restore"))
         }.joinToString("\n")
+        if (imported.changed) onImported(imported)
         ui.info(
             DshBundle.message(if (imported.changed) "configSync.success" else "configSync.noChanges"),
             detail,

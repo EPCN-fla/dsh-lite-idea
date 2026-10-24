@@ -57,7 +57,7 @@ class ChatPanel(
         }, com.intellij.openapi.application.ModalityState.any())
     }
     private val bridge = BridgeManager.getInstance(project)
-    private val configSyncFlow = com.dshlite.idea.bridge.ConfigSyncFlow(project, bridge)
+    private val configSyncFlow = com.dshlite.idea.bridge.ConfigSyncFlow(project, bridge, ::onConfigImported)
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(ChatPanel::class.java)
 
     /* ------------------------------ entries ------------------------------ */
@@ -134,6 +134,39 @@ class ChatPanel(
             .getValue("dsh.brokenPresets") ?: "")
             .split(',').filter { it.isNotBlank() }.toMutableSet()
     }
+
+    /** Positive import evidence, scoped to this runtime/home/profile rather than bridge capability. */
+    private var cordisHostSupportImported: Boolean = run {
+        val profile = com.dshlite.idea.settings.DshSettingsState.getInstance().profile
+        com.intellij.ide.util.PropertiesComponent.getInstance()
+            .getValue(cordisSupportKey(profile)).toBoolean()
+    }
+
+    private fun cordisSupportKey(profile: String): String {
+        val s = com.dshlite.idea.settings.DshSettingsState.getInstance()
+        val identity = listOf(s.runtime, s.wslDistro, s.envMap()["DSH_HOME"].orEmpty(), profile)
+            .joinToString("\u0000")
+        val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(identity.toByteArray(Charsets.UTF_8))
+        return "dsh.cordisHostSupport.$encoded"
+    }
+
+    private fun onConfigImported(imported: com.dshlite.idea.bridge.ConfigSyncSummary) {
+        val importedPresets = imported.presets.toSet()
+        if (importedPresets.isEmpty()) return
+        if ("cordis" in importedPresets) {
+            com.intellij.ide.util.PropertiesComponent.getInstance()
+                .setValue(cordisSupportKey(imported.target), true)
+            val currentProfile = com.dshlite.idea.settings.DshSettingsState.getInstance().profile
+            if (imported.target == currentProfile) cordisHostSupportImported = true
+        }
+        if (failedPresets.removeAll(importedPresets)) {
+            com.intellij.ide.util.PropertiesComponent.getInstance()
+                .setValue("dsh.brokenPresets", failedPresets.joinToString(","))
+        }
+        refreshPresets()
+    }
+
     private data class PermissionMode(val value: String, val name: String)
 
     private var presets: List<PresetInfo> = emptyList()
@@ -173,12 +206,6 @@ class ChatPanel(
                 updateTitle()
                 updateStatus(service.state, null)
                 if (state == BridgeState.ON) {
-                    // Imported support rows may repair presets rejected by an older profile.
-                    if (capabilities?.configSync == true) {
-                        failedPresets.clear()
-                        com.intellij.ide.util.PropertiesComponent.getInstance()
-                            .setValue("dsh.brokenPresets", "")
-                    }
                     loadWelcomeSessions()
                     sessionId?.let { bridgeAttach(it) }
                 } else {
@@ -742,7 +769,7 @@ class ChatPanel(
                     isDefault = o.get("isDefault")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false,
                     broken = effectivePresetBrokenReason(
                         id = pid,
-                        configSync = c.capabilities?.configSync == true,
+                        hostSupportImported = cordisHostSupportImported,
                         nativeBroken = o.get("broken")
                             ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
                         failedPreviously = pid in failedPresets,

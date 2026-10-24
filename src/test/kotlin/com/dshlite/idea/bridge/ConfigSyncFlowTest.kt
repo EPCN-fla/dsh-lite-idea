@@ -66,7 +66,8 @@ class ConfigSyncFlowTest {
             scopes += ConfigSyncOptions(models = true, presets = true)
             policies += false
         }
-        val flow = ConfigSyncFlow(connection, ui) { it() }
+        val imported = mutableListOf<ConfigSyncSummary>()
+        val flow = ConfigSyncFlow(connection, ui, { it() }, { imported += it })
     }
 
     @Test fun `imports exactly reviewed options and revision with bounded deadlines`() {
@@ -90,6 +91,7 @@ class ConfigSyncFlowTest {
         assertTrue(result.second!!.contains("/host/profile/backup.yml"))
         assertTrue(result.second!!.contains("acp-vscode"))
         assertTrue(f.ui.errors.isEmpty())
+        assertEquals(listOf("acp-vscode"), f.imported.map { it.target })
     }
 
     @Test fun `model only overwrite and preset only scopes preserve options`() {
@@ -145,6 +147,7 @@ class ConfigSyncFlowTest {
         assertEquals(1, f.rpc.calls.count { it.method == "config.import" })
         assertEquals(DshBundle.message("configSync.error.stale"), f.ui.errors.single())
         assertFalse(f.ui.errors.single().contains("SECRET"))
+        assertTrue(f.imported.isEmpty())
     }
 
     @Test fun `connection replacement during confirmation cannot import elsewhere`() {
