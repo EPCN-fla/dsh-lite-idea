@@ -96,10 +96,8 @@ __PATCH_CURRENT__YML
   fi
   rm -f "$PATCH_TMP"
 fi
-if ! grep -q dsh-vscode-bridge "$PROF/package.json" 2>/dev/null; then
-  echo "[install] installing bridge package __PKG__…"
-  __COMMAND__ plugin --profile acp-vscode add "__PKG__"
-else
-  echo "[install] bridge package already installed"
-fi
+# `dsh plugin add` forwards to pnpm: reapplying the confirmed spec is a no-op
+# when it is current and upgrades an existing 0.3.x install when it is not.
+echo "[install] installing/updating bridge package __PKG__…"
+__COMMAND__ plugin --profile acp-vscode add "__PKG__"
 echo "[install] DONE"

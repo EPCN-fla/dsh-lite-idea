@@ -57,6 +57,7 @@ class ChatPanel(
         }, com.intellij.openapi.application.ModalityState.any())
     }
     private val bridge = BridgeManager.getInstance(project)
+    private val configSyncFlow = com.dshlite.idea.bridge.ConfigSyncFlow(project, bridge)
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(ChatPanel::class.java)
 
     /* ------------------------------ entries ------------------------------ */
@@ -127,11 +128,6 @@ class ChatPanel(
 
     private data class PresetInfo(val id: String, val name: String, val isDefault: Boolean, val broken: String?)
 
-    /** Presets that can never run in a headless ACP session (mirrors dsh-lite-vscode). */
-    private val hostIncompatiblePresets = mapOf(
-        "cordis" to "Requires the Web/Desktop client plane (Cordis plugin runtime); unavailable in headless ACP sessions.",
-    )
-
     /** Presets the host rejected at mount time (learned, persisted app-wide). */
     private val failedPresets: MutableSet<String> by lazy {
         (com.intellij.ide.util.PropertiesComponent.getInstance()
@@ -177,6 +173,12 @@ class ChatPanel(
                 updateTitle()
                 updateStatus(service.state, null)
                 if (state == BridgeState.ON) {
+                    // Imported support rows may repair presets rejected by an older profile.
+                    if (capabilities?.configSync == true) {
+                        failedPresets.clear()
+                        com.intellij.ide.util.PropertiesComponent.getInstance()
+                            .setValue("dsh.brokenPresets", "")
+                    }
                     loadWelcomeSessions()
                     sessionId?.let { bridgeAttach(it) }
                 } else {
@@ -368,6 +370,7 @@ class ChatPanel(
     fun openSessionsAction() = openSessions()
     fun showSkillsDialogAction() = showSkillsDialog()
     fun exportSessionAction() = exportSession()
+    fun importWebConfigAction() = configSyncFlow.run()
     fun reconnectAction() = reconnect()
     fun runDoctorAction() = runDoctor()
     fun installBridgeAction() {
@@ -737,9 +740,13 @@ class ChatPanel(
                     id = pid,
                     name = o.get("name")?.takeIf { it.isJsonPrimitive }?.asString ?: pid,
                     isDefault = o.get("isDefault")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false,
-                    broken = hostIncompatiblePresets[pid]
-                        ?: o.get("broken")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
-                        ?: if (pid in failedPresets) "failed to mount previously" else null,
+                    broken = effectivePresetBrokenReason(
+                        id = pid,
+                        configSync = c.capabilities?.configSync == true,
+                        nativeBroken = o.get("broken")
+                            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
+                        failedPreviously = pid in failedPresets,
+                    ),
                 )
             } ?: return@executeOnPooledThread
             // First start reports null: fall back to the roster default ("standard").

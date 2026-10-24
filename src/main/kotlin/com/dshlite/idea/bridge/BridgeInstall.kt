@@ -1,9 +1,10 @@
 /**
  * One-shot bridge installer/repairer, ported from dsh-lite-vscode
  * src/bridge/install.ts + installScript.ts. The bash template and the
- * cordis.patch.yml variants are vendored as resources (generated from the
- * VS Code sources, byte-identical); only __COMMAND__/__PKG__ are
- * interpolated at run time.
+ * cordis.patch.yml variants are vendored as resources. The patch variants
+ * remain byte-identical to the VS Code sources; the install script additionally
+ * reapplies the requested package spec so Repair also upgrades an older bridge.
+ * Only __COMMAND__/__PKG__ are interpolated at run time.
  *
  * Steps (all idempotent, executed by the script on the target side):
  *   1. create the acp-vscode profile from the acp template if missing
@@ -28,7 +29,7 @@ object BridgeInstall {
 
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(BridgeInstall::class.java)
 
-    const val BRIDGE_SPEC_CURRENT = "dsh-vscode-bridge@^0.3.0"
+    const val BRIDGE_SPEC_CURRENT = "dsh-vscode-bridge@^0.4.0"
     const val BRIDGE_SPEC_LEGACY = "dsh-vscode-bridge@^0.2.0"
 
     private fun resource(name: String): String =

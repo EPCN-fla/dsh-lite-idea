@@ -33,6 +33,8 @@ data class BridgeCapabilities(
     val commands: Boolean = false,
     val skills: Boolean = false,
     val sessionExport: Boolean = false,
+    /** bridge 0.4.0+: explicit Web model/preset import. Absent on older bridges. */
+    val configSync: Boolean = false,
 )
 
 data class BridgeHandshake(
@@ -55,9 +57,12 @@ data class BridgeDiscoveryEntry(
 class BridgeClient private constructor(
     private val socket: Socket,
     private val token: String,
-) {
+) : ConfigSyncRpc {
     companion object {
         private val gson: Gson = GsonBuilder().disableHtmlEscaping().create()
+        private val timeoutScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "dsh-bridge-timeouts").apply { isDaemon = true }
+        }
 
         fun connect(
             entry: BridgeDiscoveryEntry,
@@ -91,6 +96,7 @@ class BridgeClient private constructor(
                         commands = caps.bool("commands"),
                         skills = caps.bool("skills"),
                         sessionExport = caps.bool("sessionExport"),
+                        configSync = caps.bool("configSync"),
                     ),
                 )
             } catch (e: Exception) {
@@ -124,7 +130,7 @@ class BridgeClient private constructor(
     @Volatile
     var isOpen = true; private set
 
-    val capabilities: BridgeCapabilities? get() = handshake?.capabilities
+    override val capabilities: BridgeCapabilities? get() = handshake?.capabilities
 
     private fun startReader() {
         Thread({
@@ -187,7 +193,7 @@ class BridgeClient private constructor(
         pending.keys.toList().forEach { id -> pending.remove(id)?.completeExceptionally(e) }
     }
 
-    fun request(method: String, params: JsonObject? = null): CompletableFuture<JsonObject?> {
+    override fun request(method: String, params: JsonObject?, timeoutMs: Long?): CompletableFuture<JsonObject?> {
         if (!isOpen) {
             return CompletableFuture<JsonObject?>().also {
                 it.completeExceptionally(BridgeException("bridge connection closed", -32000, null))
@@ -196,7 +202,17 @@ class BridgeClient private constructor(
         val id = nextId.getAndIncrement()
         val f = CompletableFuture<JsonObject?>()
         pending[id] = f
-        f.whenComplete { _, _ -> pending.remove(id, f) }
+        val timeout = timeoutMs?.let { delay ->
+            timeoutScheduler.schedule({
+                if (pending.remove(id, f)) {
+                    f.completeExceptionally(BridgeException("bridge request timed out", -32000, "bridge/timeout"))
+                }
+            }, delay, TimeUnit.MILLISECONDS)
+        }
+        f.whenComplete { _, _ ->
+            pending.remove(id, f)
+            timeout?.cancel(false)
+        }
         if (!isOpen) {
             // Closed between the check and the registration (see close()).
             failPending()
