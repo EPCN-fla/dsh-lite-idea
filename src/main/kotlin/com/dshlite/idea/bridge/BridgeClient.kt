@@ -60,9 +60,6 @@ class BridgeClient private constructor(
 ) : ConfigSyncRpc {
     companion object {
         private val gson: Gson = GsonBuilder().disableHtmlEscaping().create()
-        private val timeoutScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "dsh-bridge-timeouts").apply { isDaemon = true }
-        }
 
         fun connect(
             entry: BridgeDiscoveryEntry,
@@ -125,6 +122,12 @@ class BridgeClient private constructor(
     var onClose: () -> Unit = {}
 
     private val writer: Writer = OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)
+    private val timeoutScheduler = java.util.concurrent.ScheduledThreadPoolExecutor(1) { r ->
+        Thread(r, "dsh-bridge-timeouts").apply { isDaemon = true }
+    }.apply {
+        removeOnCancelPolicy = true
+        executeExistingDelayedTasksAfterShutdownPolicy = false
+    }
     private val pending = ConcurrentHashMap<Long, CompletableFuture<JsonObject?>>()
     private val nextId = AtomicLong(1)
     @Volatile
@@ -184,6 +187,7 @@ class BridgeClient private constructor(
         isOpen = false
         if (!closeHandled.compareAndSet(false, true)) return
         runCatching { socket.close() }
+        timeoutScheduler.shutdownNow()
         failPending()
         runCatching { onClose() }
     }
@@ -248,6 +252,7 @@ class BridgeClient private constructor(
         isOpen = false
         closeHandled.set(true)
         runCatching { socket.close() }
+        timeoutScheduler.shutdownNow()
         failPending()
     }
 }
