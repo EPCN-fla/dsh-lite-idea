@@ -37,10 +37,10 @@ Claude Code and Codex integrations. Sibling of [dsh-lite-vscode](https://github.
 
 | dsh-lite-idea | DeepSeek Harness | dsh-vscode-bridge |
 |---|---|---|
-| **0.1.0** | 0.2.1-rc.x | ≥ 0.4.0 |
-| **0.1.0** | 0.2.0-rc.x | ≥ 0.4.0 |
-| **0.1.0** | 0.1.7-rc.x | ≥ 0.4.0 |
-| **0.1.0** | 0.1.5-rc.2 | 0.1.3 – 0.2.x (bridge 0.3.0 dropped 0.1.5 — the installer pre-fills `dsh-vscode-bridge@^0.2.0` there) |
+| **0.1.0 – 0.1.1** | 0.2.1-rc.x | ≥ 0.4.0 |
+| **0.1.0 – 0.1.1** | 0.2.0-rc.x | ≥ 0.4.0 |
+| **0.1.0 – 0.1.1** | 0.1.7-rc.x | ≥ 0.4.0 |
+| **0.1.0 – 0.1.1** | 0.1.5-rc.2 | 0.1.3 – 0.2.x (bridge 0.3.0 dropped 0.1.5 — the installer pre-fills `dsh-vscode-bridge@^0.2.0` there) |
 
 The table lists recommended pairings; existing features still work with older bridges, while Web
 configuration import requires bridge 0.4.0+ advertising `configSync`. The version corridor matches
