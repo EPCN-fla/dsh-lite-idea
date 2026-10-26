@@ -9,10 +9,10 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.dshlite.idea.util.AsyncLineWriter
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.io.Writer
 import java.net.InetAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
@@ -121,7 +121,10 @@ class BridgeClient private constructor(
     @Volatile
     var onClose: () -> Unit = {}
 
-    private val writer: Writer = OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)
+    private val writer = AsyncLineWriter(
+        OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8),
+        "dsh-bridge-writer",
+    )
     private val timeoutScheduler = java.util.concurrent.ScheduledThreadPoolExecutor(1) { r ->
         Thread(r, "dsh-bridge-timeouts").apply { isDaemon = true }
     }.apply {
@@ -186,9 +189,10 @@ class BridgeClient private constructor(
     private fun handleClose() {
         isOpen = false
         if (!closeHandled.compareAndSet(false, true)) return
+        failPending()
+        writer.shutdown()
         runCatching { socket.close() }
         timeoutScheduler.shutdownNow()
-        failPending()
         runCatching { onClose() }
     }
 
@@ -206,12 +210,21 @@ class BridgeClient private constructor(
         val id = nextId.getAndIncrement()
         val f = CompletableFuture<JsonObject?>()
         pending[id] = f
-        val timeout = timeoutMs?.let { delay ->
-            timeoutScheduler.schedule({
-                if (pending.remove(id, f)) {
-                    f.completeExceptionally(BridgeException("bridge request timed out", -32000, "bridge/timeout"))
-                }
-            }, delay, TimeUnit.MILLISECONDS)
+        val timeout = try {
+            timeoutMs?.let { delay ->
+                timeoutScheduler.schedule({
+                    if (pending.remove(id, f)) {
+                        f.completeExceptionally(BridgeException("bridge request timed out", -32000, "bridge/timeout"))
+                    }
+                }, delay, TimeUnit.MILLISECONDS)
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // close() can shut down the scheduler between the isOpen check and
+            // registration. Complete normally instead of throwing synchronously
+            // into UI flows and leaving their running state latched.
+            pending.remove(id)
+            f.completeExceptionally(BridgeException("bridge connection closed", -32000, null))
+            return f
         }
         f.whenComplete { _, _ ->
             pending.remove(id, f)
@@ -230,10 +243,9 @@ class BridgeClient private constructor(
             addProperty("token", token)
         }
         try {
-            synchronized(writer) {
-                writer.write(gson.toJson(frame))
-                writer.write("\n")
-                writer.flush()
+            writer.writeLine(gson.toJson(frame)) { e ->
+                pending.remove(id)
+                f.completeExceptionally(e)
             }
         } catch (e: Exception) {
             pending.remove(id)
@@ -251,8 +263,9 @@ class BridgeClient private constructor(
     fun close() {
         isOpen = false
         closeHandled.set(true)
+        failPending()
+        writer.shutdown()
         runCatching { socket.close() }
         timeoutScheduler.shutdownNow()
-        failPending()
     }
 }

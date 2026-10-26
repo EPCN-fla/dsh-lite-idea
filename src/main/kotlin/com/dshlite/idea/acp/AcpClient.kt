@@ -11,10 +11,10 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.dshlite.idea.util.AsyncLineWriter
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.io.Writer
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -87,7 +87,10 @@ class AcpClient private constructor(
 
     var agentIdentity: AgentIdentity? = null; private set
 
-    private val writer: Writer = OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8)
+    private val writer = AsyncLineWriter(
+        OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8),
+        "dsh-acp-writer",
+    )
     private val pending = ConcurrentHashMap<Long, CompletableFuture<JsonObject?>>()
     private val nextId = AtomicLong(1)
     private val closed = AtomicBoolean(false)
@@ -204,12 +207,9 @@ class AcpClient private constructor(
         }
     }
 
-    @Synchronized
-    private fun write(obj: JsonObject) {
+    private fun write(obj: JsonObject, onFailure: (Exception) -> Unit = {}) {
         if (closed.get()) return
-        writer.write(gson.toJson(obj))
-        writer.write("\n")
-        writer.flush()
+        writer.writeLine(gson.toJson(obj), onFailure)
     }
 
     private fun respond(id: com.google.gson.JsonElement, result: JsonObject) {
@@ -256,7 +256,10 @@ class AcpClient private constructor(
                 addProperty("id", id)
                 addProperty("method", method)
                 add("params", params)
-            })
+            }) { e ->
+                pending.remove(id)
+                future.completeExceptionally(e)
+            }
         } catch (e: Exception) {
             pending.remove(id)
             future.completeExceptionally(e)
@@ -280,11 +283,11 @@ class AcpClient private constructor(
     fun close() {
         if (!closed.compareAndSet(false, true)) return
         failAll(AcpException("dsh connection closed"))
-        // writer.close() can block on a full stdin pipe with a hung child —
-        // never run this on the EDT (reset() comes from the toolbar).
+        writer.shutdown()
+        // Closing the underlying stream can still wait for a blocked flush.
+        // Kill the child and finish close on a daemon, never on the EDT.
         Thread({
-            // Kill first: close() on a writer whose flush is blocked by a
-            // full pipe takes the same lock and otherwise never reaches kill.
+            // Kill first so a full stdin pipe cannot keep close blocked forever.
             runCatching { process.destroy() }
             runCatching {
                 if (!process.waitFor(3, TimeUnit.SECONDS)) process.destroyForcibly()

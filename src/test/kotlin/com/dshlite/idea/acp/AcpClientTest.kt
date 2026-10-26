@@ -17,6 +17,7 @@ class AcpClientTest {
         private val agentOutput = PipedOutputStream(input)
         private val dead = CountDownLatch(1)
         private val requests = ByteArrayOutputStream()
+        val frames = java.util.concurrent.LinkedBlockingQueue<Pair<JsonObject, String>>()
         @Volatile var alive = true
         private val stdin = object : OutputStream() {
             override fun write(b: Int) { requests.write(b) }
@@ -26,7 +27,8 @@ class AcpClientTest {
                 if (lines.isBlank()) return
                 for (line in lines.lineSequence()) {
                     val request = JsonParser.parseString(line).asJsonObject
-                    if (request.get("method").asString == "initialize") {
+                    frames.add(request to Thread.currentThread().name)
+                    if (request.get("method")?.asString == "initialize") {
                         send("""{"id":${request.get("id")},"result":{"agentInfo":{"name":"test"}}}""")
                     }
                 }
@@ -60,6 +62,25 @@ class AcpClientTest {
         assertEquals((0..99).map { it.toString() }, chunks)
         assertFalse(client.isAlive())
         assertThrows(ExecutionException::class.java) { client.request("after.exit", JsonObject()).get(1, TimeUnit.SECONDS) }
+    }
+
+    @Test fun `requests enqueue ndjson writes instead of flushing on the caller`() {
+        val process = AgentProcess()
+        val client = AcpClient.start(process, "test", object : AcpClientListener {
+            override fun onSessionUpdate(sessionId: String, update: SessionUpdateData) {}
+            override fun onPermission(request: PermissionRequestData) = CompletableFuture.completedFuture<String?>(null)
+        }, 2000)
+        process.frames.clear() // discard the initialize request
+        try {
+            val caller = Thread.currentThread().name
+            client.request("test.request", JsonObject())
+            val (frame, writerThread) = process.frames.poll(2, TimeUnit.SECONDS)
+                ?: throw AssertionError("request frame was not written")
+            assertEquals("test.request", frame.get("method").asString)
+            assertNotEquals(caller, writerThread)
+        } finally {
+            client.close()
+        }
     }
 
     @Test fun `close completes unanswered requests`() {
