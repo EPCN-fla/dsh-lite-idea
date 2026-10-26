@@ -157,15 +157,19 @@ object SessionHistory {
     }
 
     /** Parse the root `session[.vN].jsonl` of an export archive (null if absent). */
-    fun parseArchive(file: File): List<HistoryMessage>? =
-        ZipFile(file).use { zip ->
+    fun parseArchive(file: File): List<HistoryMessage>? {
+        // Check the real file before parsing its central directory; bridge-reported
+        // bytes are only an early hint and may be absent or stale.
+        require(file.isFile) { "Session archive is not a regular file" }
+        require(file.length() <= MAX_ARCHIVE_BYTES) { "Session archive exceeds 32 MiB" }
+        return ZipFile(file).use { zip ->
             val entry = zip.entries().asSequence().firstOrNull { ROOT_LOG.matches(it.name) } ?: return null
-            require(file.length() <= MAX_ARCHIVE_BYTES) { "Session archive exceeds 32 MiB" }
             require(entry.size <= MAX_ARCHIVE_BYTES) { "Session log exceeds 32 MiB" }
             val bytes = zip.getInputStream(entry).use { it.readNBytes((MAX_ARCHIVE_BYTES + 1).toInt()) }
             require(bytes.size <= MAX_ARCHIVE_BYTES) { "Session log exceeds 32 MiB" }
             parse(bytes.toString(Charsets.UTF_8))
         }
+    }
 
     /**
      * Node program for the shell fallback (fed through stdin, so no quoting
@@ -175,9 +179,10 @@ object SessionHistory {
      * a frame is skipped by extending the slice until it decodes), and prints
      * only the event types the parser needs.
      */
-    private val NODE_READER = """
+    internal val NODE_READER = """
         const fs = require('fs'), path = require('path'), zlib = require('zlib');
         const KEEP = new Set(['user/message', 'assistant/message', 'tool/call', 'tool/result']);
+        const MAX = $MAX_ARCHIVE_BYTES;
         let found = false;
         for (const dir of process.argv.slice(2)) {
           let names; try { names = fs.readdirSync(dir); } catch (e) { continue; }
@@ -185,25 +190,58 @@ object SessionHistory {
             .filter(Boolean).sort((a, b) => b.v - a.v);
           if (!logs.length) continue;
           found = true;
-          const buf = fs.readFileSync(path.join(dir, logs[0].n));
+          const file = path.join(dir, logs[0].n);
+          const stat = fs.statSync(file);
+          if (!stat.isFile() || stat.size > MAX) throw new Error('Session log exceeds 32 MiB');
+          const buf = fs.readFileSync(file);
           let text = '';
           if (!logs[0].z) text = buf.toString('utf8');
           else {
             if (typeof zlib.zstdDecompressSync !== 'function') throw new Error('Node zstd support is required');
             const at = [];
             const chunks = [];
+            let decodedBytes = 0;
             for (let i = 0; i + 4 <= buf.length; i++) if (buf.readUInt32LE(i) === 0xfd2fb528) at.push(i);
             let start = at.length ? at[0] : buf.length;
             for (let k = 1; k <= at.length; k++) {
               const end = k < at.length ? at[k] : buf.length;
-              try { chunks.push(zlib.zstdDecompressSync(buf.subarray(start, end))); start = end; } catch (e) {}
+              try {
+                // One extra byte distinguishes overflow from an exactly-full log.
+                const decoded = zlib.zstdDecompressSync(
+                  buf.subarray(start, end),
+                  { maxOutputLength: MAX - decodedBytes + 1 },
+                );
+                decodedBytes += decoded.length;
+                if (decodedBytes > MAX) throw new Error('Session log exceeds 32 MiB');
+                chunks.push(decoded);
+                start = end;
+              } catch (e) {
+                // A magic-looking byte run inside a frame is skipped by extending
+                // the slice. Overflow is a hard failure, never a partial import.
+                if (e && e.code === 'ERR_BUFFER_TOO_LARGE') throw new Error('Session log exceeds 32 MiB');
+                if (e && e.message === 'Session log exceeds 32 MiB') throw e;
+              }
             }
             if (!chunks.length) throw new Error('No readable zstd frame in the session log');
-            text = Buffer.concat(chunks).toString('utf8');
+            text = Buffer.concat(chunks, decodedBytes).toString('utf8');
           }
-          for (const line of text.split('\n')) {
-            if (!line.trim()) continue;
-            try { if (KEEP.has(JSON.parse(line).type)) process.stdout.write(line + '\n'); } catch (e) {}
+          let outputBytes = 0, offset = 0;
+          while (offset < text.length) {
+            let end = text.indexOf('\n', offset);
+            if (end < 0) end = text.length;
+            const line = text.substring(offset, end);
+            let keep = false;
+            if (line.trim()) {
+              try { keep = KEEP.has(JSON.parse(line).type); } catch (e) {}
+            }
+            if (keep) {
+              const bytes = Buffer.byteLength(line, 'utf8') + 1;
+              outputBytes += bytes;
+              if (outputBytes > MAX) throw new Error('Filtered session history exceeds 32 MiB');
+              process.stdout.write(line + '\n');
+            }
+            if (end === text.length) break;
+            offset = end + 1;
           }
           break;
         }

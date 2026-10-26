@@ -3,6 +3,8 @@ package com.dshlite.idea.acp
 import com.dshlite.idea.launcher.Launcher
 import com.dshlite.idea.launcher.createLauncher
 import com.dshlite.idea.util.destroyProcessTree
+import com.dshlite.idea.util.readBytesBounded
+import com.dshlite.idea.util.readUtf8Bounded
 import com.dshlite.idea.settings.DshSettingsState
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -228,7 +230,7 @@ class AcpService(private val project: Project) : Disposable {
                 // a Windows pipe buffer is ~4KB — reading only after waitFor()
                 // deadlocks the child mid-write (this was the real effort-pin
                 // blocker; Linux's 64KB buffer masked it in testing).
-                val outFuture = com.dshlite.idea.util.ioAsync { process.inputStream.bufferedReader().readText() }
+                val outFuture = com.dshlite.idea.util.ioAsync { readUtf8Bounded(process.inputStream, MAX_SHELL_OUTPUT_BYTES) }
                 if (!process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                     destroyProcessTree(process, forcibly = true)
                     future.completeExceptionally(AcpException("target shell timed out"))
@@ -258,7 +260,7 @@ class AcpService(private val project: Project) : Disposable {
                 // See runTargetShell: one-shot wsl.exe probes must close stdin,
                 // and stdout must drain concurrently (pipe-buffer deadlock).
                 runCatching { proc.outputStream.close() }
-                val outFuture = com.dshlite.idea.util.ioAsync { proc.inputStream.readBytes() }
+                val outFuture = com.dshlite.idea.util.ioAsync { readBytesBounded(proc.inputStream, MAX_DOCTOR_OUTPUT_BYTES) }
                 if (!proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
                     destroyProcessTree(proc, forcibly = true)
                     future.completeExceptionally(AcpException("doctor timed out after 30s"))
@@ -284,6 +286,9 @@ class AcpService(private val project: Project) : Disposable {
     }
 
     companion object {
+        private const val MAX_SHELL_OUTPUT_BYTES = 32 * 1024 * 1024
+        private const val MAX_DOCTOR_OUTPUT_BYTES = 1024 * 1024
+
         fun getInstance(project: Project): AcpService = project.getService(AcpService::class.java)
 
         private fun pluginVersion(): String = runCatching {

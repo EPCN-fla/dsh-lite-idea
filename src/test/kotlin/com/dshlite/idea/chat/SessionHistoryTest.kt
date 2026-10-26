@@ -64,6 +64,15 @@ class SessionHistoryTest {
         } finally { file.delete() }
     }
 
+    @Test fun `rejects an oversized file before trying to parse it as ZIP`() {
+        val file = Files.createTempFile("dsh-history-oversized-", ".bin").toFile()
+        try {
+            java.io.RandomAccessFile(file, "rw").use { it.setLength(33L * 1024 * 1024) }
+            val error = assertThrows(IllegalArgumentException::class.java) { SessionHistory.parseArchive(file) }
+            assertTrue(error.message!!.contains("32 MiB"))
+        } finally { file.delete() }
+    }
+
     @Test fun `rejects shell and glob metacharacters in session ids`() {
         for (id in listOf("*", ".", "..", "-danger", "a/b", "a'", "a;id", "\$(id)", "a\nb", "")) {
             assertFalse(id, SessionIds.isSafe(id))
