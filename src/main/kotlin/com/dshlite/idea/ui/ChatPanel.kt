@@ -174,6 +174,10 @@ class ChatPanel(
     private var permModes: List<PermissionMode> = emptyList()
     private var currentPermMode: String? = null
     @Volatile private var bridgeSubscribedSession: String? = null
+    @Volatile private var bridgeSubscribedClient: com.dshlite.idea.bridge.BridgeClient? = null
+    private val bridgeAttachExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "dsh-bridge-attach").apply { isDaemon = true }
+    }
 
     /* --------------------- slash commands & skills ----------------------- */
 
@@ -212,6 +216,7 @@ class ChatPanel(
                     presets = emptyList(); permModes = emptyList()
                     nativeCommands = emptyList(); skills = emptyList()
                     bridgeSubscribedSession = null // force resubscribe after a bridge reconnect
+                    bridgeSubscribedClient = null
                     rebuildConfigBar()
                     updateSlashPopup()
                 }
@@ -415,13 +420,20 @@ class ChatPanel(
         if (!bridge.isOn) return
         val c = bridge.client ?: return
         val caps = bridge.capabilities
-        ApplicationManager.getApplication().executeOnPooledThread {
-            if (bridgeSubscribedSession != id) {
+        // Serialize unsubscribe/subscribe pairs in the order session switches
+        // were initiated. A slow A can finish before the queued B, but can no
+        // longer overwrite B's later subscription.
+        bridgeAttachExecutor.execute {
+            if (disposed || sessionId != id || bridge.client !== c) return@execute
+            if (bridgeSubscribedSession != id || bridgeSubscribedClient !== c) {
                 runCatching { c.request("session.unsubscribe", timeoutMs = 5_000).get(5, java.util.concurrent.TimeUnit.SECONDS) }
                 runCatching {
                     c.request("session.subscribe", JsonObject().apply { addProperty("sessionId", id) }, 5_000)
                         .get(5, java.util.concurrent.TimeUnit.SECONDS)
-                }.onSuccess { bridgeSubscribedSession = id }
+                }.onSuccess {
+                    bridgeSubscribedSession = id
+                    bridgeSubscribedClient = c
+                }
             }
             if (caps?.workspaceGrouping == true) {
                 runCatching {
@@ -1952,6 +1964,7 @@ class ChatPanel(
         updateListener?.let(service::removeUpdateListener)
         service.removeStateListener(stateListener)
         bridge.removeListener(bridgeListener)
+        bridgeAttachExecutor.shutdownNow()
         if (service.permissionResponder != null) service.permissionResponder = null
     }
 }
