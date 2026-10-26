@@ -84,7 +84,7 @@ class AcpService(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val launcher = launcher()
-                val spec = launcher.buildLaunchSpec(workspaceDshPath())
+                val spec = launcher.buildLaunchSpec(workspaceIdePath())
                 ideLog.info("[dsh] starting: ${launcher.label}")
                 // The shell command embeds user environment values; never
                 // log its body (single-quote redaction misses escaped quotes).
