@@ -21,4 +21,12 @@ class WslPathTest {
             assertEquals(path, toWslPath(path))
         }
     }
+    @Test fun `encodes WSL resource links as file URIs`() {
+        val settings = com.dshlite.idea.settings.DshSettingsState()
+        val uri = WslLauncher(settings).toDshResourceUri(
+            "\\\\wsl.localhost\\Ubuntu\\home\\me\\a b#%中.txt"
+        )
+        assertEquals("file:///home/me/a%20b%23%25%E4%B8%AD.txt", uri)
+    }
+
 }

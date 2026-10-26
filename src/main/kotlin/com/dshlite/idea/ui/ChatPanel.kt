@@ -1466,9 +1466,10 @@ class ChatPanel(
                 val launcher = com.dshlite.idea.launcher.createLauncher(
                     com.dshlite.idea.settings.DshSettingsState.getInstance()
                 )
+                val referencedNames = referencedMentionNames(text, files.keys)
                 for ((name, path) in files) {
-                    if (text.contains("@" + name)) {
-                        blocks.add(ContentBlock.resourceLink("file://" + launcher.toDshPath(path), name))
+                    if (name in referencedNames) {
+                        blocks.add(ContentBlock.resourceLink(launcher.toDshResourceUri(path), name))
                     }
                 }
                 blocks.add(ContentBlock.text(text))

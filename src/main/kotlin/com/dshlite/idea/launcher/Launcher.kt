@@ -37,6 +37,9 @@ interface Launcher {
 
     /** dsh-side absolute path -> IDE-side absolute path. */
     fun fromDshPath(p: String): String
+
+    /** IDE-side file path -> a correctly encoded ACP resource_link URI. */
+    fun toDshResourceUri(p: String): String
 }
 
 /** Target-side shell bootstrap: make version-manager-managed Node.js visible to non-interactive shells. */
@@ -69,6 +72,9 @@ object ShellEnv {
 
     fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
 }
+
+internal fun posixFileUri(path: String): String =
+    java.net.URI("file", "", path, null, null).toASCIIString()
 
 /** Map Windows drive and WSL UNC paths without starting wsl.exe on the EDT. */
 internal fun toWslPath(path: String): String {
@@ -116,6 +122,8 @@ class WslLauncher(private val settings: DshSettingsState) : Launcher {
     private val wslMount = Regex("""^/mnt/([a-z])/(.*)$""")
 
     override fun toDshPath(p: String): String = toWslPath(p)
+
+    override fun toDshResourceUri(p: String): String = posixFileUri(toDshPath(p))
 
     override fun fromDshPath(p: String): String {
         val m = wslMount.matchEntire(p)
@@ -179,6 +187,10 @@ class LocalLauncher(private val settings: DshSettingsState) : Launcher {
 
     override fun toDshPath(p: String): String = File(p).absolutePath
     override fun fromDshPath(p: String): String = p
+    override fun toDshResourceUri(p: String): String {
+        val path = toDshPath(p)
+        return if (SystemInfoRt.isWindows) File(path).toURI().toASCIIString() else posixFileUri(path)
+    }
 }
 
 /**
