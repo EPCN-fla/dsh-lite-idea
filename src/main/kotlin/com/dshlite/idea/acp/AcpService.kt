@@ -250,7 +250,10 @@ class AcpService(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val spec = launcher().buildDoctorSpec()
-                val proc = ProcessBuilder(spec.command).redirectErrorStream(true).start()
+                val builder = ProcessBuilder(spec.command).redirectErrorStream(true)
+                spec.cwd?.let { builder.directory(java.io.File(it)) }
+                builder.environment().putAll(spec.env)
+                val proc = builder.start()
                 // See runTargetShell: one-shot wsl.exe probes must close stdin,
                 // and stdout must drain concurrently (pipe-buffer deadlock).
                 runCatching { proc.outputStream.close() }
@@ -262,11 +265,9 @@ class AcpService(private val project: Project) : Disposable {
                 }
                 val raw = outFuture.get(5, java.util.concurrent.TimeUnit.SECONDS)
                 val text = String(raw).replace("\r\n", "\n").trim()
-                // Self-diagnosing report: a blank body with the spec lets us see
-                // wsl.exe quoting/encoding breakage from a screenshot alone.
+                // Never include spec.command here: it can contain exported credentials.
                 val body = if (text.isEmpty()) {
-                    "(no output — exit=" + proc.exitValue() + ", bytes=" + raw.size + ", cmd: " +
-                        spec.command.joinToString(" ") { if (it.length > 120) it.take(120) + "…" else it } + ")"
+                    "(no output — exit=" + proc.exitValue() + ", bytes=" + raw.size + ")"
                 } else text
                 future.complete(body)
             } catch (e: Exception) {

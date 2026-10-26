@@ -1,5 +1,4 @@
 set -e
-export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PROF="$DSH_HOME/profiles/acp-vscode"
 if [ ! -d "$PROF" ]; then

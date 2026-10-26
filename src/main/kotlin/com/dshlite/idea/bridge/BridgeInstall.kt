@@ -44,7 +44,7 @@ object BridgeInstall {
     }
 
     fun buildVersionProbeScript(command: String): String =
-        "${com.dshlite.idea.launcher.ShellEnv.posixBootstrap()}; $command --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n1"
+        "$command --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n1"
 
     /** Assemble the full install script for the target side. */
     fun buildInstallScript(command: String, pkg: String): String =
@@ -57,11 +57,7 @@ object BridgeInstall {
 
     private fun targetShellArgs(): List<String> {
         val s = DshSettingsState.getInstance()
-        val wsl = when (s.runtime) {
-            "wsl" -> true
-            "local" -> false
-            else -> SystemInfoRt.isWindows
-        }
+        val wsl = com.dshlite.idea.launcher.usesWsl(s.runtime, SystemInfoRt.isWindows)
         return if (wsl) buildList {
             add("wsl.exe")
             if (s.wslDistro.isNotBlank()) { add("-d"); add(s.wslDistro) }
@@ -83,7 +79,12 @@ object BridgeInstall {
                 val stderrF = com.dshlite.idea.util.ioAsync("dsh-install-stderr") { process.errorStream.bufferedReader().readText() }
                 val stdin = OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8)
                 try {
-                    stdin.write(script)
+                    stdin.write(
+                        com.dshlite.idea.launcher.ShellEnv.withTargetEnvironment(
+                            script,
+                            DshSettingsState.getInstance().envMap(),
+                        )
+                    )
                     stdin.flush()
                 } finally {
                     runCatching { stdin.close() } // EPIPE when the child dies before reading

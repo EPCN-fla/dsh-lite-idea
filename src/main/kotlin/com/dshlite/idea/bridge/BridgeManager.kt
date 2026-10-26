@@ -104,11 +104,7 @@ class BridgeManager(private val project: Project) : Disposable {
     /** Read all discovery entries; the string is a diagnostic for the Doctor report. */
     private fun readDiscoveryEntries(): Pair<String, List<BridgeDiscoveryEntry>> {
         val s = settings()
-        val target = if (!SystemInfoRt.isWindows) "local" else when (s.runtime) {
-            "wsl" -> "wsl"
-            "windows", "local" -> "local"
-            else -> if (SystemInfoRt.isWindows) "wsl" else "local"
-        }
+        val target = if (com.dshlite.idea.launcher.usesWsl(s.runtime, SystemInfoRt.isWindows)) "wsl" else "local"
         val dshHomeOverride = s.envMap()["DSH_HOME"]?.takeIf { it.isNotBlank() }
         return when (target) {
             "wsl" -> readDiscoveryViaWsl(dshHomeOverride)
