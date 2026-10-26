@@ -83,6 +83,65 @@ class AcpClientTest {
         }
     }
 
+    @Test fun `control requests time out without killing the connection`() {
+        val process = AgentProcess()
+        val client = AcpClient.start(process, "test", object : AcpClientListener {
+            override fun onSessionUpdate(sessionId: String, update: SessionUpdateData) {}
+            override fun onPermission(request: PermissionRequestData) = CompletableFuture.completedFuture<String?>(null)
+        }, 2000)
+        try {
+            val error = assertThrows(ExecutionException::class.java) {
+                client.request("silent.control", JsonObject(), 20).get(1, TimeUnit.SECONDS)
+            }
+            assertTrue(error.cause is AcpException)
+            assertTrue(error.cause!!.message!!.contains("timed out"))
+            assertTrue(client.isAlive())
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test fun `malformed permission params receive invalid params instead of hanging`() {
+        val process = AgentProcess()
+        val client = AcpClient.start(process, "test", object : AcpClientListener {
+            override fun onSessionUpdate(sessionId: String, update: SessionUpdateData) {}
+            override fun onPermission(request: PermissionRequestData): CompletableFuture<String?> =
+                throw AssertionError("malformed request must not reach the responder")
+        }, 2000)
+        try {
+            process.send("""{"id":"bad","method":"session/request_permission","params":{"sessionId":"s","options":"bad"}}""")
+            val response = responseFor(process, "bad")
+            assertEquals(-32602, response.getAsJsonObject("error").get("code").asInt)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test fun `throwing permission responder settles the request as cancelled`() {
+        val process = AgentProcess()
+        val client = AcpClient.start(process, "test", object : AcpClientListener {
+            override fun onSessionUpdate(sessionId: String, update: SessionUpdateData) {}
+            override fun onPermission(request: PermissionRequestData): CompletableFuture<String?> =
+                throw IllegalStateException("dialog failed")
+        }, 2000)
+        try {
+            process.send("""{"id":"perm","method":"session/request_permission","params":{"sessionId":"s","options":[]}}""")
+            val response = responseFor(process, "perm")
+            assertEquals("cancelled", response.getAsJsonObject("result").getAsJsonObject("outcome").get("outcome").asString)
+        } finally {
+            client.close()
+        }
+    }
+
+    private fun responseFor(process: AgentProcess, id: String): JsonObject {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (System.nanoTime() < deadline) {
+            val (frame, _) = process.frames.poll(100, TimeUnit.MILLISECONDS) ?: continue
+            if (frame.get("id")?.asString == id) return frame
+        }
+        throw AssertionError("no response for $id")
+    }
+
     @Test fun `close completes unanswered requests`() {
         val process = AgentProcess()
         val client = AcpClient.start(process, "test", object : AcpClientListener {
