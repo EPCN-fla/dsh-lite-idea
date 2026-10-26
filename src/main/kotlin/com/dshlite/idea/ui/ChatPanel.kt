@@ -90,6 +90,7 @@ class ChatPanel(
     )
     private val centerCards = JPanel(java.awt.CardLayout())
     private var showingWelcome = true
+    private var welcomeSessionsGeneration = 0L
 
     private val entries = ArrayList<Entry>()
     private val toolEntries = HashMap<String, ToolEntry>()
@@ -1278,9 +1279,12 @@ class ChatPanel(
     /** Fill the welcome panel's recent-session list (best effort, agent boots for this). */
     private fun loadWelcomeSessions() {
         if (!showingWelcome) return
+        val generation = ++welcomeSessionsGeneration
         fetchSessions().whenComplete { list, err ->
             onEdt {
-                if (err == null && showingWelcome) welcomePanel.setSessions(list)
+                if (err == null && generation == welcomeSessionsGeneration && showingWelcome) {
+                    welcomePanel.setSessions(list.filter { it.sessionId !in archivedLocal() })
+                }
             }
         }
     }
@@ -1330,20 +1334,25 @@ class ChatPanel(
                     addSystemMessage(DshBundle.message("chat.noSessions"))
                     return@onEdt
                 }
+                var refreshGeneration = 0L
                 val dialog = SessionsDialog(project, list, bridgeSessionOps(), currentId = sessionId) { onChanged ->
                     // Rename/delete landed: refresh the welcome list now, and
                     // re-list for the dialog after a beat (the host applies the
-                    // archive asynchronously).
-                    loadWelcomeSessions()
-                    fetchSessions().whenComplete { fresh, err ->
-                        onEdt { if (err == null && fresh != null) onChanged(fresh) }
-                    }
-                    Timer(800) {
-                        if (!disposed) {
-                            fetchSessions().whenComplete { fresh, err ->
-                                onEdt { if (err == null && fresh != null) onChanged(fresh) }
+                    // archive asynchronously). Only the newest request may apply.
+                    fun refresh() {
+                        val generation = ++refreshGeneration
+                        fetchSessions().whenComplete { fresh, err ->
+                            onEdt {
+                                if (err == null && fresh != null && generation == refreshGeneration) {
+                                    onChanged(fresh.filter { it.sessionId !in archivedLocal() })
+                                }
                             }
                         }
+                    }
+                    loadWelcomeSessions()
+                    refresh()
+                    Timer(800) {
+                        if (!disposed) refresh()
                     }.apply { isRepeats = false; start() }
                 }
                 if (dialog.showAndGet()) {
