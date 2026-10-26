@@ -105,13 +105,28 @@ internal fun mapWslPath(path: String): WslPathMapping {
 
 internal fun toWslPath(path: String): String = mapWslPath(path).path
 
+internal fun wslDistroForWorkspace(settings: DshSettingsState, ideWorkspacePath: String?): String? {
+    val configured = settings.wslDistro.trim().takeIf { it.isNotEmpty() }
+    val unc = ideWorkspacePath?.let { mapWslPath(it).distro }
+    if (unc != null) {
+        require(configured == null || configured.equals(unc, ignoreCase = true)) {
+            "WSL distro mismatch: the project is in '$unc' but settings select '$configured'."
+        }
+    }
+    return unc ?: configured
+}
+
 /** Case 2: IDE on Windows, dsh inside WSL. stdio pipes forwarded through wsl.exe. */
-class WslLauncher(private val settings: DshSettingsState) : Launcher {
+class WslLauncher(
+    private val settings: DshSettingsState,
+    private val ideWorkspacePath: String? = null,
+) : Launcher {
     override val label = "windows-host -> wsl"
 
-    private fun configuredDistro(): String? = settings.wslDistro.trim().takeIf { it.isNotEmpty() }
-
-    private fun wslArgs(innerBash: String, distro: String? = configuredDistro()): List<String> = buildList {
+    private fun wslArgs(
+        innerBash: String,
+        distro: String? = wslDistroForWorkspace(settings, ideWorkspacePath),
+    ): List<String> = buildList {
         add("wsl.exe")
         if (distro != null) { add("-d"); add(distro) }
         add("-e"); add("bash"); add("-lc"); add(innerBash)
@@ -120,12 +135,7 @@ class WslLauncher(private val settings: DshSettingsState) : Launcher {
     override fun buildLaunchSpec(ideWorkspacePath: String): LaunchSpec {
         val mapping = mapWslPath(ideWorkspacePath)
         val dshWorkspaceCwd = mapping.path
-        val configured = configuredDistro()
-        val distro = mapping.distro?.also { uncDistro ->
-            require(configured == null || configured.equals(uncDistro, ignoreCase = true)) {
-                "WSL distro mismatch: the project is in '$uncDistro' but settings select '$configured'."
-            }
-        } ?: configured
+        val distro = wslDistroForWorkspace(settings, ideWorkspacePath)
         val exports = ShellEnv.exports(settings.envMap())
         val inner = buildString {
             append(ShellEnv.posixBootstrap()).append("; ")
@@ -161,7 +171,8 @@ class WslLauncher(private val settings: DshSettingsState) : Launcher {
     private fun wslPath(p: String, flag: String): String? = runCatching {
         val args = buildList {
             add("wsl.exe")
-            if (settings.wslDistro.isNotBlank()) { add("-d"); add(settings.wslDistro) }
+            val distro = wslDistroForWorkspace(settings, ideWorkspacePath)
+            if (distro != null) { add("-d"); add(distro) }
             add("-e"); add("wslpath"); add(flag); add(p)
         }
         val proc = ProcessBuilder(args).redirectErrorStream(true).start()
@@ -233,5 +244,9 @@ class LocalLauncher(private val settings: DshSettingsState) : Launcher {
 internal fun usesWsl(runtime: String, isWindows: Boolean): Boolean =
     isWindows && runtime !in setOf("windows", "local")
 
-fun createLauncher(settings: DshSettingsState): Launcher =
-    if (usesWsl(settings.runtime, SystemInfoRt.isWindows)) WslLauncher(settings) else LocalLauncher(settings)
+fun createLauncher(settings: DshSettingsState, ideWorkspacePath: String? = null): Launcher =
+    if (usesWsl(settings.runtime, SystemInfoRt.isWindows)) {
+        WslLauncher(settings, ideWorkspacePath)
+    } else {
+        LocalLauncher(settings)
+    }

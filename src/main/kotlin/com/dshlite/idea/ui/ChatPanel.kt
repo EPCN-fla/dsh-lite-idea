@@ -708,7 +708,8 @@ class ChatPanel(
                 val bytes = res.get("bytes")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0
                 // The zip path is dsh-side; map it back to the IDE side for reveal/copy.
                 val hostPath = com.dshlite.idea.launcher.createLauncher(
-                    com.dshlite.idea.settings.DshSettingsState.getInstance()
+                    com.dshlite.idea.settings.DshSettingsState.getInstance(),
+                    project.basePath,
                 ).fromDshPath(path)
                 val size = if (bytes > 1024 * 1024) "%.1f MB".format(bytes / 1024.0 / 1024.0)
                 else "${maxOf(1, bytes / 1024)} KB"
@@ -1128,7 +1129,7 @@ class ChatPanel(
     private fun loadTranscript(id: String) {
         val epoch = sessionEpoch
         val client = bridge.client?.takeIf { bridge.isOn && bridge.capabilities?.sessionExport == true }
-        val launcher = com.dshlite.idea.launcher.createLauncher(com.dshlite.idea.settings.DshSettingsState.getInstance())
+        val launcher = com.dshlite.idea.launcher.createLauncher(com.dshlite.idea.settings.DshSettingsState.getInstance(), project.basePath)
         ApplicationManager.getApplication().executeOnPooledThread {
             var failure: Throwable? = null
             var source = "bridge"
@@ -1515,7 +1516,8 @@ class ChatPanel(
                 val blocks = ArrayList<ContentBlock>()
                 // Referenced @-files cross to the dsh side as resource links.
                 val launcher = com.dshlite.idea.launcher.createLauncher(
-                    com.dshlite.idea.settings.DshSettingsState.getInstance()
+                    com.dshlite.idea.settings.DshSettingsState.getInstance(),
+                    project.basePath,
                 )
                 val referencedNames = referencedMentionNames(text, files.keys)
                 for ((name, path) in files) {

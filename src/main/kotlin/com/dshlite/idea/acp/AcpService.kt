@@ -66,7 +66,7 @@ class AcpService(private val project: Project) : Disposable {
 
     val isReady: Boolean get() = client?.isAlive() == true
 
-    private fun launcher(): Launcher = createLauncher(DshSettingsState.getInstance())
+    private fun launcher(): Launcher = createLauncher(DshSettingsState.getInstance(), project.basePath)
 
     fun workspaceIdePath(): String =
         project.basePath ?: throw AcpException("Open a project folder first — dsh needs an absolute workspace cwd.")

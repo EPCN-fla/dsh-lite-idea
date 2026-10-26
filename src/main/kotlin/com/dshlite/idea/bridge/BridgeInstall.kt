@@ -55,12 +55,13 @@ object BridgeInstall {
             .replace("__PATCH_LEGACY__", resource("cordis-patch-legacy.yml"))
             .replace("__COMMAND__", command)
 
-    private fun targetShellArgs(arguments: List<String>): List<String> {
+    private fun targetShellArgs(arguments: List<String>, ideWorkspacePath: String?): List<String> {
         val s = DshSettingsState.getInstance()
         val wsl = com.dshlite.idea.launcher.usesWsl(s.runtime, SystemInfoRt.isWindows)
         val args = if (wsl) buildList {
             add("wsl.exe")
-            if (s.wslDistro.isNotBlank()) { add("-d"); add(s.wslDistro) }
+            val distro = com.dshlite.idea.launcher.wslDistroForWorkspace(s, ideWorkspacePath)
+            if (distro != null) { add("-d"); add(distro) }
             add("-e"); add("bash"); add("-s")
         }.toMutableList() else mutableListOf("/bin/bash", "-s")
         if (arguments.isNotEmpty()) {
@@ -75,12 +76,13 @@ object BridgeInstall {
         script: String,
         timeoutMs: Long,
         arguments: List<String> = emptyList(),
+        ideWorkspacePath: String? = null,
     ): CompletableFuture<Pair<String, String>> {
         val future = CompletableFuture<Pair<String, String>>()
         ApplicationManager.getApplication().executeOnPooledThread {
             var proc: Process? = null
             try {
-                proc = ProcessBuilder(targetShellArgs(arguments)).start()
+                proc = ProcessBuilder(targetShellArgs(arguments, ideWorkspacePath)).start()
                 // Drain both streams concurrently: a full stderr pipe would block
                 // the child while we are still reading stdout (classic deadlock).
                 val process = proc
@@ -134,7 +136,7 @@ object BridgeInstall {
         // process and must not block the UI — move it off-EDT first.
         ApplicationManager.getApplication().executeOnPooledThread {
             val probed = bridge.hostDshVersion ?: runCatching {
-                runScript(buildVersionProbeScript(s.command), 30_000).get(35, TimeUnit.SECONDS).first.trim()
+                runScript(buildVersionProbeScript(s.command), 30_000, ideWorkspacePath = project.basePath).get(35, TimeUnit.SECONDS).first.trim()
             }.getOrNull()?.takeIf { it.isNotBlank() }
             val suggested = bridgeSpecForHost(probed)
             promptAndInstall(project, bridge, s, probed, suggested, onInstalled)
@@ -159,7 +161,7 @@ object BridgeInstall {
                 null,
             ) ?: return@invokeLater
             log.info("[install] starting: dsh=${probed ?: "unknown"}")
-            runScript(buildInstallScript(s.command), 180_000, listOf(pkg)).whenComplete { out, error ->
+            runScript(buildInstallScript(s.command), 180_000, listOf(pkg), project.basePath).whenComplete { out, error ->
                 ApplicationManager.getApplication().invokeLater {
                     if (error != null) {
                         log.warn("[install] failed: ${error.message}")

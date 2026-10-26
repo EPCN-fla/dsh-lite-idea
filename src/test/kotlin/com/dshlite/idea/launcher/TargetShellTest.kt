@@ -54,4 +54,14 @@ class TargetShellTest {
         }
     }
 
+    @Test fun `workspace UNC distro also applies to shell and doctor helpers`() {
+        val settings = DshSettingsState()
+        val workspace = "//wsl.localhost/Ubuntu/home/me/project"
+        val launcher = WslLauncher(settings, workspace)
+        assertEquals("Ubuntu", wslDistroForWorkspace(settings, workspace))
+        for (spec in listOf(launcher.buildShellSpec("pwd"), launcher.buildDoctorSpec())) {
+            assertEquals(listOf("wsl.exe", "-d", "Ubuntu", "-e", "bash", "-lc"), spec.command.dropLast(1))
+        }
+    }
+
 }

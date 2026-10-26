@@ -155,7 +155,8 @@ class BridgeManager(private val project: Project) : Disposable {
         val script = "for f in " + dirExpr + "/*.json; do [ -f \"${'$'}f\" ] || continue; echo '<<<'; cat \"${'$'}f\"; done"
         val args = buildList {
             add("wsl.exe")
-            if (s.wslDistro.isNotBlank()) { add("-d"); add(s.wslDistro) }
+            val distro = com.dshlite.idea.launcher.wslDistroForWorkspace(s, project.basePath)
+            if (distro != null) { add("-d"); add(distro) }
             add("-e"); add("bash"); add("-lc"); add(script)
         }
         return runCatching {
@@ -261,7 +262,7 @@ class BridgeManager(private val project: Project) : Disposable {
             lastDiscoveryInfo = "no workspace folder"
             teardown("no workspace folder"); return
         }
-        val dshCwd = createLauncher(settings()).toDshPath(basePath)
+        val dshCwd = createLauncher(settings(), basePath).toDshPath(basePath)
         val (discInfo, entries) = readDiscoveryEntries()
         val entry = pickEntry(entries, dshCwd)
         if (entry == null) {
