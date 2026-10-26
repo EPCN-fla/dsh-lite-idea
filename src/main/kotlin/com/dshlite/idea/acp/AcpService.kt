@@ -2,6 +2,7 @@ package com.dshlite.idea.acp
 
 import com.dshlite.idea.launcher.Launcher
 import com.dshlite.idea.launcher.createLauncher
+import com.dshlite.idea.util.destroyProcessTree
 import com.dshlite.idea.settings.DshSettingsState
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -94,7 +95,7 @@ class AcpService(private val project: Project) : Disposable {
                 val proc = pb.start()
                 synchronized(this) {
                     if (starting !== future || disposed || project.isDisposed) {
-                        proc.destroyForcibly()
+                        destroyProcessTree(proc, forcibly = true)
                         return@executeOnPooledThread
                     }
                     startingProcess = proc
@@ -147,7 +148,7 @@ class AcpService(private val project: Project) : Disposable {
             } catch (e: Exception) {
                 synchronized(this) {
                     if (starting === future) {
-                        startingProcess?.destroyForcibly()
+                        startingProcess?.let { destroyProcessTree(it, forcibly = true) }
                         startingProcess = null
                         starting = null
                         ideLog.warn("[dsh] startup failed: ${e.message}")
@@ -198,7 +199,7 @@ class AcpService(private val project: Project) : Disposable {
     fun reset() {
         val previousStart = starting
         starting = null
-        startingProcess?.destroyForcibly()
+        startingProcess?.let { destroyProcessTree(it, forcibly = true) }
         startingProcess = null
         val previousClient = client
         client = null
@@ -229,7 +230,7 @@ class AcpService(private val project: Project) : Disposable {
                 // blocker; Linux's 64KB buffer masked it in testing).
                 val outFuture = com.dshlite.idea.util.ioAsync { process.inputStream.bufferedReader().readText() }
                 if (!process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                    process.destroyForcibly()
+                    destroyProcessTree(process, forcibly = true)
                     future.completeExceptionally(AcpException("target shell timed out"))
                     return@executeOnPooledThread
                 }
@@ -237,7 +238,7 @@ class AcpService(private val project: Project) : Disposable {
                 if (process.exitValue() != 0) throw AcpException("target shell exited ${process.exitValue()}")
                 future.complete(out)
             } catch (e: Exception) {
-                proc?.destroyForcibly()
+                proc?.let { destroyProcessTree(it, forcibly = true) }
                 future.completeExceptionally(e)
             }
         }
@@ -259,7 +260,7 @@ class AcpService(private val project: Project) : Disposable {
                 runCatching { proc.outputStream.close() }
                 val outFuture = com.dshlite.idea.util.ioAsync { proc.inputStream.readBytes() }
                 if (!proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
-                    proc.destroyForcibly()
+                    destroyProcessTree(proc, forcibly = true)
                     future.completeExceptionally(AcpException("doctor timed out after 30s"))
                     return@executeOnPooledThread
                 }

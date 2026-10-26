@@ -12,6 +12,7 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.dshlite.idea.util.AsyncLineWriter
+import com.dshlite.idea.util.terminateProcessTree
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
@@ -288,11 +289,10 @@ class AcpClient private constructor(
         // Kill the child and finish close on a daemon, never on the EDT.
         Thread({
             // Kill first so a full stdin pipe cannot keep close blocked forever.
-            runCatching { process.destroy() }
-            runCatching {
-                if (!process.waitFor(3, TimeUnit.SECONDS)) process.destroyForcibly()
-            }
+            runCatching { terminateProcessTree(process) }
             runCatching { writer.close() }
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
         }, "dsh-acp-close").apply { isDaemon = true; start() }
     }
 
