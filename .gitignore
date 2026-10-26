@@ -4,8 +4,11 @@ build/
 *.iml
 local.properties
 smoke/
-.intellijPlatform/localPlatformArtifacts/
+.intellijPlatform/
 
 # Local maintenance notes
 /docs/RELEASING.md
 /docs/CODE_REVIEW.md
+
+# Kotlin compiler local state
+.kotlin/
