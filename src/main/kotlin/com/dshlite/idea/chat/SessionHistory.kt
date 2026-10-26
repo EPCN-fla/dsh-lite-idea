@@ -1,5 +1,6 @@
 package com.dshlite.idea.chat
 
+import com.dshlite.idea.DshBundle
 import com.dshlite.idea.bridge.BridgeClient
 import com.dshlite.idea.launcher.Launcher
 import com.dshlite.idea.launcher.ShellEnv
@@ -77,10 +78,10 @@ object SessionHistory {
                         val b = el as? JsonObject ?: return@forEach
                         when (b.str("type")) {
                             "text" -> b.str("text")?.let(parts::add)
-                            "image" -> parts.add("🖼 " + (b.obj("attachment")?.str("name") ?: "image"))
+                            "image" -> parts.add("🖼 " + (b.obj("attachment")?.str("name") ?: DshBundle.message("history.image")))
                             "file" -> {
                                 val a = b.obj("attachment")
-                                parts.add("📄 " + (a?.str("name") ?: a?.str("fileName") ?: "file"))
+                                parts.add("📄 " + (a?.str("name") ?: a?.str("fileName") ?: DshBundle.message("history.file")))
                             }
                         }
                     }
@@ -130,12 +131,17 @@ object SessionHistory {
                     tool.status = if (error?.isBoolean == true && error.asBoolean) "failed" else "completed"
                     val detail = textOf(result.arr("content"))
                     if (detail.isNotEmpty()) {
-                        tool.detail = if (detail.length > MAX_RESULT_CHARS) detail.take(MAX_RESULT_CHARS) + "\n… (truncated)" else detail
+                        tool.detail = if (detail.length > MAX_RESULT_CHARS) detail.take(MAX_RESULT_CHARS) + "\n" + DshBundle.message("tool.truncated") else detail
                     }
                 }
             }
         }
-        // A call without a recorded result was interrupted (crash/cancel).
+        // A static log cannot still be running: a call without a recorded
+        // result was interrupted by a crash/cancel. A later live update can
+        // still replace this state through the registered history card.
+        out.filterIsInstance<HistoryMessage.Tool>().forEach { tool ->
+            if (tool.status == "in_progress") tool.status = "failed"
+        }
         return out
     }
 
@@ -144,7 +150,7 @@ object SessionHistory {
      * archive is missing, oversized, or has no root log.
      */
     fun importViaBridge(client: BridgeClient, launcher: Launcher, sessionId: String): List<HistoryMessage>? {
-        val res = client.request("session.exportZip", JsonObject().apply { addProperty("sessionId", sessionId) })
+        val res = client.request("session.exportZip", JsonObject().apply { addProperty("sessionId", sessionId) }, 60_000)
             .get(60, TimeUnit.SECONDS) ?: return null
         val path = res.str("path") ?: return null
         val bytes = res.get("bytes")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L
@@ -157,15 +163,19 @@ object SessionHistory {
     }
 
     /** Parse the root `session[.vN].jsonl` of an export archive (null if absent). */
-    fun parseArchive(file: File): List<HistoryMessage>? =
-        ZipFile(file).use { zip ->
+    fun parseArchive(file: File): List<HistoryMessage>? {
+        // Check the real file before parsing its central directory; bridge-reported
+        // bytes are only an early hint and may be absent or stale.
+        require(file.isFile) { "Session archive is not a regular file" }
+        require(file.length() <= MAX_ARCHIVE_BYTES) { "Session archive exceeds 32 MiB" }
+        return ZipFile(file).use { zip ->
             val entry = zip.entries().asSequence().firstOrNull { ROOT_LOG.matches(it.name) } ?: return null
-            require(file.length() <= MAX_ARCHIVE_BYTES) { "Session archive exceeds 32 MiB" }
             require(entry.size <= MAX_ARCHIVE_BYTES) { "Session log exceeds 32 MiB" }
             val bytes = zip.getInputStream(entry).use { it.readNBytes((MAX_ARCHIVE_BYTES + 1).toInt()) }
             require(bytes.size <= MAX_ARCHIVE_BYTES) { "Session log exceeds 32 MiB" }
             parse(bytes.toString(Charsets.UTF_8))
         }
+    }
 
     /**
      * Node program for the shell fallback (fed through stdin, so no quoting
@@ -175,9 +185,10 @@ object SessionHistory {
      * a frame is skipped by extending the slice until it decodes), and prints
      * only the event types the parser needs.
      */
-    private val NODE_READER = """
+    internal val NODE_READER = """
         const fs = require('fs'), path = require('path'), zlib = require('zlib');
         const KEEP = new Set(['user/message', 'assistant/message', 'tool/call', 'tool/result']);
+        const MAX = $MAX_ARCHIVE_BYTES;
         let found = false;
         for (const dir of process.argv.slice(2)) {
           let names; try { names = fs.readdirSync(dir); } catch (e) { continue; }
@@ -185,25 +196,58 @@ object SessionHistory {
             .filter(Boolean).sort((a, b) => b.v - a.v);
           if (!logs.length) continue;
           found = true;
-          const buf = fs.readFileSync(path.join(dir, logs[0].n));
+          const file = path.join(dir, logs[0].n);
+          const stat = fs.statSync(file);
+          if (!stat.isFile() || stat.size > MAX) throw new Error('Session log exceeds 32 MiB');
+          const buf = fs.readFileSync(file);
           let text = '';
           if (!logs[0].z) text = buf.toString('utf8');
           else {
             if (typeof zlib.zstdDecompressSync !== 'function') throw new Error('Node zstd support is required');
             const at = [];
             const chunks = [];
+            let decodedBytes = 0;
             for (let i = 0; i + 4 <= buf.length; i++) if (buf.readUInt32LE(i) === 0xfd2fb528) at.push(i);
             let start = at.length ? at[0] : buf.length;
             for (let k = 1; k <= at.length; k++) {
               const end = k < at.length ? at[k] : buf.length;
-              try { chunks.push(zlib.zstdDecompressSync(buf.subarray(start, end))); start = end; } catch (e) {}
+              try {
+                // One extra byte distinguishes overflow from an exactly-full log.
+                const decoded = zlib.zstdDecompressSync(
+                  buf.subarray(start, end),
+                  { maxOutputLength: MAX - decodedBytes + 1 },
+                );
+                decodedBytes += decoded.length;
+                if (decodedBytes > MAX) throw new Error('Session log exceeds 32 MiB');
+                chunks.push(decoded);
+                start = end;
+              } catch (e) {
+                // A magic-looking byte run inside a frame is skipped by extending
+                // the slice. Overflow is a hard failure, never a partial import.
+                if (e && e.code === 'ERR_BUFFER_TOO_LARGE') throw new Error('Session log exceeds 32 MiB');
+                if (e && e.message === 'Session log exceeds 32 MiB') throw e;
+              }
             }
             if (!chunks.length) throw new Error('No readable zstd frame in the session log');
-            text = Buffer.concat(chunks).toString('utf8');
+            text = Buffer.concat(chunks, decodedBytes).toString('utf8');
           }
-          for (const line of text.split('\n')) {
-            if (!line.trim()) continue;
-            try { if (KEEP.has(JSON.parse(line).type)) process.stdout.write(line + '\n'); } catch (e) {}
+          let outputBytes = 0, offset = 0;
+          while (offset < text.length) {
+            let end = text.indexOf('\n', offset);
+            if (end < 0) end = text.length;
+            const line = text.substring(offset, end);
+            let keep = false;
+            if (line.trim()) {
+              try { keep = KEEP.has(JSON.parse(line).type); } catch (e) {}
+            }
+            if (keep) {
+              const bytes = Buffer.byteLength(line, 'utf8') + 1;
+              outputBytes += bytes;
+              if (outputBytes > MAX) throw new Error('Filtered session history exceeds 32 MiB');
+              process.stdout.write(line + '\n');
+            }
+            if (end === text.length) break;
+            offset = end + 1;
           }
           break;
         }

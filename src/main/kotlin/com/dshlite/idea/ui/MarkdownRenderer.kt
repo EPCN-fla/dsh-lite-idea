@@ -16,6 +16,7 @@ import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
 import org.commonmark.renderer.NodeRenderer
 import org.commonmark.renderer.html.AttributeProvider
+import org.commonmark.renderer.html.DefaultUrlSanitizer
 import org.commonmark.renderer.html.HtmlNodeRendererContext
 import org.commonmark.renderer.html.HtmlNodeRendererFactory
 import org.commonmark.renderer.html.HtmlRenderer
@@ -56,7 +57,7 @@ object MarkdownRenderer {
                 is FencedCodeBlock -> node.literal
                 is IndentedCodeBlock -> node.literal
                 else -> ""
-            }.trimEnd('\n')
+            }.removeSuffix("\n")
             context.writer.line()
             context.writer.raw(
                 // Swing ignores CSS padding on cells; cellpadding works.
@@ -111,27 +112,34 @@ object MarkdownRenderer {
     }
 
     internal fun codeLinesHtml(code: String): String =
-        code.split('\n').joinToString("<br>") { raw ->
-            val line = raw.replace("\t", "    ")
+        code.split('\n').joinToString("<br>") { line ->
             if (line.isEmpty()) return@joinToString "&nbsp;"
             val sb = StringBuilder()
             var leading = true
             var prevSpace = false
+            var column = 0
+            fun appendSpace() {
+                // Leading and repeated spaces must survive whitespace collapsing.
+                sb.append(if (leading || prevSpace) "&nbsp;" else " ")
+                prevSpace = true
+                column++
+            }
             for (ch in line) {
-                if (ch == ' ') {
-                    // Leading and repeated spaces must survive whitespace collapsing.
-                    sb.append(if (leading || prevSpace) "&nbsp;" else " ")
-                    prevSpace = true
-                    continue
-                }
-                leading = false
-                prevSpace = false
                 when (ch) {
-                    '&' -> sb.append("&amp;")
-                    '<' -> sb.append("&lt;")
-                    '>' -> sb.append("&gt;")
-                    '"' -> sb.append("&quot;")
-                    else -> sb.append(ch)
+                    ' ' -> appendSpace()
+                    '\t' -> repeat(4 - column % 4) { appendSpace() }
+                    else -> {
+                        leading = false
+                        prevSpace = false
+                        column++
+                        when (ch) {
+                            '&' -> sb.append("&amp;")
+                            '<' -> sb.append("&lt;")
+                            '>' -> sb.append("&gt;")
+                            '"' -> sb.append("&quot;")
+                            else -> sb.append(ch)
+                        }
+                    }
                 }
             }
             sb.toString()
@@ -139,8 +147,10 @@ object MarkdownRenderer {
 
     private val renderer: HtmlRenderer = HtmlRenderer.builder()
         .escapeHtml(true)
-        // Block javascript:/data: etc. in links (model output is untrusted).
+        // Model output is untrusted. The default sanitizer also allows data:,
+        // so use an explicit protocol allowlist instead of relying on defaults.
         .sanitizeUrls(true)
+        .urlSanitizer(DefaultUrlSanitizer(listOf("http", "https", "mailto")))
         // Chat semantics (VS Code uses marked `breaks: true`): a newline is a newline.
         .softbreak("<br>")
         .attributeProviderFactory { tableAttributes }

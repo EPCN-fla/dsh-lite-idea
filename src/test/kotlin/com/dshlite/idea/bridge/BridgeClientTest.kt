@@ -17,7 +17,7 @@ class BridgeClientTest {
                 try {
                     val socket = server.accept()
                     val request = JsonParser.parseString(socket.getInputStream().bufferedReader().readLine()).asJsonObject
-                    val response = """{"id":${request.get("id")},"result":{"capabilities":{}}}""" + "\n"
+                    val response = """{"id":${request.get("id")},"result":{"capabilities":{"configSync":true}}}""" + "\n"
                     socket.getOutputStream().write(response.toByteArray(Charsets.UTF_8))
                     peer.complete(socket)
                 } catch (e: Exception) { peer.completeExceptionally(e) }
@@ -32,6 +32,24 @@ class BridgeClientTest {
     private fun assertClosed(f: CompletableFuture<*>) {
         val e = assertThrows(ExecutionException::class.java) { f.get(2, TimeUnit.SECONDS) }
         assertTrue(e.cause is BridgeException)
+    }
+
+    @Test fun `handshake parses config sync capability`() = withPeer { client, _ ->
+        assertTrue(client.capabilities?.configSync == true)
+    }
+
+    @Test fun `deadline rejects silent RPC without blocking subsequent requests`() = withPeer { client, socket ->
+        val reader = socket.getInputStream().bufferedReader()
+        val silent = client.request("silent", null, 20)
+        JsonParser.parseString(reader.readLine()).asJsonObject
+        val timeout = assertThrows(ExecutionException::class.java) { silent.get(2, TimeUnit.SECONDS) }
+        assertTrue(timeout.cause is BridgeException)
+        assertEquals("bridge/timeout", (timeout.cause as BridgeException).dataCode)
+
+        val pong = client.request("ping", null, 1000)
+        val request = JsonParser.parseString(reader.readLine()).asJsonObject
+        socket.getOutputStream().write((("""{"id":${request.get("id")},"result":{"pong":true}}""" + "\n").toByteArray(Charsets.UTF_8)))
+        assertTrue(pong.get(2, TimeUnit.SECONDS)?.get("pong")?.asBoolean == true)
     }
 
     @Test fun `local close fails every pending request immediately`() = withPeer { client, _ ->

@@ -11,10 +11,11 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.dshlite.idea.util.AsyncLineWriter
+import com.dshlite.idea.util.terminateProcessTree
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.io.Writer
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -42,6 +43,7 @@ class AcpClient private constructor(
         private val gson: Gson = GsonBuilder().disableHtmlEscaping().create()
         const val PROTOCOL_VERSION = 1
         private const val CLIENT_NAME = "dsh-idea"
+        private const val CONTROL_TIMEOUT_MS = 30_000L
 
         /** Start the agent process and run the initialize handshake. */
         fun start(
@@ -87,8 +89,17 @@ class AcpClient private constructor(
 
     var agentIdentity: AgentIdentity? = null; private set
 
-    private val writer: Writer = OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8)
+    private val writer = AsyncLineWriter(
+        OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8),
+        "dsh-acp-writer",
+    )
     private val pending = ConcurrentHashMap<Long, CompletableFuture<JsonObject?>>()
+    private val timeoutScheduler = java.util.concurrent.ScheduledThreadPoolExecutor(1) { runnable ->
+        Thread(runnable, "dsh-acp-timeouts").apply { isDaemon = true }
+    }.apply {
+        removeOnCancelPolicy = true
+        executeExistingDelayedTasksAfterShutdownPolicy = false
+    }
     private val nextId = AtomicLong(1)
     private val closed = AtomicBoolean(false)
     private val stderrTail = StringBuilder()
@@ -184,32 +195,38 @@ class AcpClient private constructor(
     }
 
     private fun handleIncomingRequest(id: com.google.gson.JsonElement, method: String, params: JsonObject?) {
-        if (method == "session/request_permission" && params != null) {
-            val req = PermissionRequestData.parse(params)
-            listener.onPermission(req).whenComplete { optionId, _ ->
-                val outcome = JsonObject().apply {
-                    if (optionId != null) {
-                        add("outcome", JsonObject().apply {
-                            addProperty("outcome", "selected")
-                            addProperty("optionId", optionId)
-                        })
-                    } else {
-                        add("outcome", JsonObject().apply { addProperty("outcome", "cancelled") })
-                    }
-                }
-                respond(id, outcome)
-            }
-        } else {
+        if (method != "session/request_permission") {
             respondError(id, -32601, "Method not found: $method")
+            return
         }
+        if (params == null) {
+            respondError(id, -32602, "Invalid params")
+            return
+        }
+        val req = try {
+            PermissionRequestData.parse(params)
+        } catch (_: Exception) {
+            respondError(id, -32602, "Invalid permission params")
+            return
+        }
+        val answer = try {
+            listener.onPermission(req)
+        } catch (_: Exception) {
+            respond(id, permissionOutcome(null))
+            return
+        }
+        answer.whenComplete { optionId, _ -> respond(id, permissionOutcome(optionId)) }
     }
 
-    @Synchronized
-    private fun write(obj: JsonObject) {
-        if (closed.get()) return
-        writer.write(gson.toJson(obj))
-        writer.write("\n")
-        writer.flush()
+    private fun permissionOutcome(optionId: String?): JsonObject = JsonObject().apply {
+        if (optionId != null) {
+            add("outcome", JsonObject().apply {
+                addProperty("outcome", "selected")
+                addProperty("optionId", optionId)
+            })
+        } else {
+            add("outcome", JsonObject().apply { addProperty("outcome", "cancelled") })
+        }
     }
 
     private fun respond(id: com.google.gson.JsonElement, result: JsonObject) {
@@ -231,8 +248,13 @@ class AcpClient private constructor(
         })
     }
 
+    private fun write(obj: JsonObject, onFailure: (Exception) -> Unit = {}) {
+        if (closed.get()) return
+        writer.writeLine(gson.toJson(obj), onFailure)
+    }
+
     /** Send a request; the future completes with the result object (may be null). */
-    fun request(method: String, params: JsonObject): CompletableFuture<JsonObject?> {
+    fun request(method: String, params: JsonObject, timeoutMs: Long? = null): CompletableFuture<JsonObject?> {
         if (closed.get() || !process.isAlive) {
             return CompletableFuture<JsonObject?>().also {
                 it.completeExceptionally(AcpException("dsh connection is closed"))
@@ -241,7 +263,23 @@ class AcpClient private constructor(
         val id = nextId.getAndIncrement()
         val future = CompletableFuture<JsonObject?>()
         pending[id] = future
-        future.whenComplete { _, _ -> pending.remove(id, future) }
+        val timeout = try {
+            timeoutMs?.let { delay ->
+                timeoutScheduler.schedule({
+                    if (pending.remove(id, future)) {
+                        future.completeExceptionally(AcpException("dsh request timed out: $method"))
+                    }
+                }, delay, TimeUnit.MILLISECONDS)
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            pending.remove(id)
+            future.completeExceptionally(AcpException("dsh connection is closed"))
+            return future
+        }
+        future.whenComplete { _, _ ->
+            pending.remove(id, future)
+            timeout?.cancel(false)
+        }
         // The process may have exited between the check above and the
         // registration: failAll() already ran, so nothing would ever settle
         // this future. Re-check after registering.
@@ -256,7 +294,10 @@ class AcpClient private constructor(
                 addProperty("id", id)
                 addProperty("method", method)
                 add("params", params)
-            })
+            }) { e ->
+                pending.remove(id)
+                future.completeExceptionally(e)
+            }
         } catch (e: Exception) {
             pending.remove(id)
             future.completeExceptionally(e)
@@ -280,16 +321,16 @@ class AcpClient private constructor(
     fun close() {
         if (!closed.compareAndSet(false, true)) return
         failAll(AcpException("dsh connection closed"))
-        // writer.close() can block on a full stdin pipe with a hung child —
-        // never run this on the EDT (reset() comes from the toolbar).
+        timeoutScheduler.shutdownNow()
+        writer.shutdown()
+        // Closing the underlying stream can still wait for a blocked flush.
+        // Kill the child and finish close on a daemon, never on the EDT.
         Thread({
-            // Kill first: close() on a writer whose flush is blocked by a
-            // full pipe takes the same lock and otherwise never reaches kill.
-            runCatching { process.destroy() }
-            runCatching {
-                if (!process.waitFor(3, TimeUnit.SECONDS)) process.destroyForcibly()
-            }
+            // Kill first so a full stdin pipe cannot keep close blocked forever.
+            runCatching { terminateProcessTree(process) }
             runCatching { writer.close() }
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
         }, "dsh-acp-close").apply { isDaemon = true; start() }
     }
 
@@ -301,7 +342,7 @@ class AcpClient private constructor(
         request("session/new", JsonObject().apply {
             addProperty("cwd", cwd)
             add("mcpServers", com.google.gson.JsonArray())
-        }).thenApply { r ->
+        }, CONTROL_TIMEOUT_MS).thenApply { r ->
             NewSessionData(
                 sessionId = r?.str("sessionId") ?: throw AcpException("session/new returned no sessionId"),
                 configOptions = ConfigOption.parseAll(r?.get("configOptions")),
@@ -313,7 +354,7 @@ class AcpClient private constructor(
         request("session/list", JsonObject().apply {
             if (cwd != null) addProperty("cwd", cwd)
             if (cursor != null) addProperty("cursor", cursor)
-        }).thenApply { r ->
+        }, CONTROL_TIMEOUT_MS).thenApply { r ->
             val sessions = r?.getAsJsonArray("sessions")?.mapNotNull { el ->
                 (el as? JsonObject)?.let(SessionInfoData::parse)
             } ?: emptyList()
@@ -325,7 +366,7 @@ class AcpClient private constructor(
             addProperty("sessionId", sessionId)
             addProperty("cwd", cwd)
             add("mcpServers", com.google.gson.JsonArray())
-        }).thenApply { r -> ConfigOption.parseAll(r?.get("configOptions")) }
+        }, CONTROL_TIMEOUT_MS).thenApply { r -> ConfigOption.parseAll(r?.get("configOptions")) }
 
     fun prompt(sessionId: String, blocks: List<ContentBlock>): CompletableFuture<String> =
         request("session/prompt", sessionParams(sessionId).apply {
@@ -340,7 +381,7 @@ class AcpClient private constructor(
         request("session/set_config_option", sessionParams(sessionId).apply {
             addProperty("configId", configId)
             addProperty("value", value)
-        }).thenApply { r -> ConfigOption.parseAll(r?.get("configOptions")) }
+        }, CONTROL_TIMEOUT_MS).thenApply { r -> ConfigOption.parseAll(r?.get("configOptions")) }
 
     /** Fire-and-forget: never block the caller on a dying agent. */
     fun closeSession(sessionId: String) {

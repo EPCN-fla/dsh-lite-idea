@@ -32,6 +32,30 @@ import kotlin.io.path.readText
 
 enum class BridgeState { OFF, CONNECTING, ON }
 
+internal class BridgeBackoff {
+    private var misses = 0
+    private var skipTicks = 0
+
+    @Synchronized
+    fun miss() {
+        misses = (misses + 1).coerceAtMost(5)
+        skipTicks = (1 shl (misses - 1)) - 1
+    }
+
+    @Synchronized
+    fun success() {
+        misses = 0
+        skipTicks = 0
+    }
+
+    @Synchronized
+    fun shouldSkipTick(): Boolean {
+        if (skipTicks <= 0) return false
+        skipTicks--
+        return true
+    }
+}
+
 @Service(Service.Level.PROJECT)
 class BridgeManager(private val project: Project) : Disposable {
 
@@ -67,11 +91,8 @@ class BridgeManager(private val project: Project) : Disposable {
     private var started = false
     @Volatile private var disposed = false
 
-    /** Poll ticks to skip after consecutive misses: on Windows every
-     *  discovery read spawns wsl.exe, so a workspace without a bridge must
-     *  not cost a process every 3s forever (3s → 6s → 12s … capped at 48s). */
-    @Volatile private var misses = 0
-    @Volatile private var skipTicks = 0
+    /** 3s → 6s → 12s … capped at 48s; only a usable connection resets it. */
+    private val backoff = BridgeBackoff()
 
     val isOn: Boolean get() = state == BridgeState.ON && client?.isOpen == true
     val capabilities: BridgeCapabilities? get() = client?.capabilities
@@ -92,7 +113,7 @@ class BridgeManager(private val project: Project) : Disposable {
         // UNC/dir watching is unreliable across OS boundaries; polling is the primary channel.
         scheduler.scheduleWithFixedDelay({
             if (isOn) return@scheduleWithFixedDelay
-            if (skipTicks > 0) { skipTicks--; return@scheduleWithFixedDelay }
+            if (backoff.shouldSkipTick()) return@scheduleWithFixedDelay
             reconnect()
         }, 3, 3, TimeUnit.SECONDS)
     }
@@ -104,11 +125,7 @@ class BridgeManager(private val project: Project) : Disposable {
     /** Read all discovery entries; the string is a diagnostic for the Doctor report. */
     private fun readDiscoveryEntries(): Pair<String, List<BridgeDiscoveryEntry>> {
         val s = settings()
-        val target = if (!SystemInfoRt.isWindows) "local" else when (s.runtime) {
-            "wsl" -> "wsl"
-            "windows", "local" -> "local"
-            else -> if (SystemInfoRt.isWindows) "wsl" else "local"
-        }
+        val target = if (com.dshlite.idea.launcher.usesWsl(s.runtime, SystemInfoRt.isWindows)) "wsl" else "local"
         val dshHomeOverride = s.envMap()["DSH_HOME"]?.takeIf { it.isNotBlank() }
         return when (target) {
             "wsl" -> readDiscoveryViaWsl(dshHomeOverride)
@@ -138,7 +155,8 @@ class BridgeManager(private val project: Project) : Disposable {
         val script = "for f in " + dirExpr + "/*.json; do [ -f \"${'$'}f\" ] || continue; echo '<<<'; cat \"${'$'}f\"; done"
         val args = buildList {
             add("wsl.exe")
-            if (s.wslDistro.isNotBlank()) { add("-d"); add(s.wslDistro) }
+            val distro = com.dshlite.idea.launcher.wslDistroForWorkspace(s, project.basePath)
+            if (distro != null) { add("-d"); add(distro) }
             add("-e"); add("bash"); add("-lc"); add(script)
         }
         return runCatching {
@@ -230,6 +248,7 @@ class BridgeManager(private val project: Project) : Disposable {
                 reconnectUnsafe()
             } catch (e: Exception) {
                 log.warn("[bridge] reconnect failed: ${e.message}")
+                backoff.miss()
                 teardown("connect failed")
             } finally {
                 reconnectInFlight.set(false)
@@ -243,21 +262,21 @@ class BridgeManager(private val project: Project) : Disposable {
             lastDiscoveryInfo = "no workspace folder"
             teardown("no workspace folder"); return
         }
-        val dshCwd = createLauncher(settings()).toDshPath(basePath)
+        val dshCwd = createLauncher(settings(), basePath).toDshPath(basePath)
         val (discInfo, entries) = readDiscoveryEntries()
         val entry = pickEntry(entries, dshCwd)
         if (entry == null) {
             lastDiscoveryInfo = discInfo + " want=" + dshCwd + " (no match)"
-            misses = (misses + 1).coerceAtMost(5)
-            skipTicks = (1 shl (misses - 1)) - 1
+            backoff.miss()
             teardown("no bridge entry for this workspace")
             return
         }
-        misses = 0
-        skipTicks = 0
         lastDiscoveryInfo = discInfo + " picked pid=" + entry.pid + " port=" + entry.port
         val current = client
-        if (current != null && current.isOpen && connectedPid == entry.pid) return
+        if (current != null && current.isOpen && connectedPid == entry.pid) {
+            backoff.success()
+            return
+        }
 
         fireState(BridgeState.CONNECTING)
         try {
@@ -282,10 +301,12 @@ class BridgeManager(private val project: Project) : Disposable {
                 connectedPid = entry.pid
                 hostDshVersion = c.handshake?.dshVersion ?: entry.dshVersion
                 log.info("[bridge] connected pid=${entry.pid} v${c.handshake?.version} dsh=${hostDshVersion ?: "unknown"}")
+                backoff.success()
                 fireState(BridgeState.ON)
             }
         } catch (e: Exception) {
             log.warn("[bridge] connect pid=${entry.pid} failed: ${e.message}")
+            backoff.miss()
             teardown("connect failed")
         }
     }

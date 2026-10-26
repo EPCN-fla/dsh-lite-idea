@@ -2,6 +2,9 @@ package com.dshlite.idea.acp
 
 import com.dshlite.idea.launcher.Launcher
 import com.dshlite.idea.launcher.createLauncher
+import com.dshlite.idea.util.destroyProcessTree
+import com.dshlite.idea.util.readBytesBounded
+import com.dshlite.idea.util.readUtf8Bounded
 import com.dshlite.idea.settings.DshSettingsState
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -63,7 +66,7 @@ class AcpService(private val project: Project) : Disposable {
 
     val isReady: Boolean get() = client?.isAlive() == true
 
-    private fun launcher(): Launcher = createLauncher(DshSettingsState.getInstance())
+    private fun launcher(): Launcher = createLauncher(DshSettingsState.getInstance(), project.basePath)
 
     fun workspaceIdePath(): String =
         project.basePath ?: throw AcpException("Open a project folder first — dsh needs an absolute workspace cwd.")
@@ -84,7 +87,7 @@ class AcpService(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val launcher = launcher()
-                val spec = launcher.buildLaunchSpec(workspaceDshPath())
+                val spec = launcher.buildLaunchSpec(workspaceIdePath())
                 ideLog.info("[dsh] starting: ${launcher.label}")
                 // The shell command embeds user environment values; never
                 // log its body (single-quote redaction misses escaped quotes).
@@ -94,7 +97,7 @@ class AcpService(private val project: Project) : Disposable {
                 val proc = pb.start()
                 synchronized(this) {
                     if (starting !== future || disposed || project.isDisposed) {
-                        proc.destroyForcibly()
+                        destroyProcessTree(proc, forcibly = true)
                         return@executeOnPooledThread
                     }
                     startingProcess = proc
@@ -147,7 +150,7 @@ class AcpService(private val project: Project) : Disposable {
             } catch (e: Exception) {
                 synchronized(this) {
                     if (starting === future) {
-                        startingProcess?.destroyForcibly()
+                        startingProcess?.let { destroyProcessTree(it, forcibly = true) }
                         startingProcess = null
                         starting = null
                         ideLog.warn("[dsh] startup failed: ${e.message}")
@@ -198,7 +201,7 @@ class AcpService(private val project: Project) : Disposable {
     fun reset() {
         val previousStart = starting
         starting = null
-        startingProcess?.destroyForcibly()
+        startingProcess?.let { destroyProcessTree(it, forcibly = true) }
         startingProcess = null
         val previousClient = client
         client = null
@@ -227,9 +230,9 @@ class AcpService(private val project: Project) : Disposable {
                 // a Windows pipe buffer is ~4KB — reading only after waitFor()
                 // deadlocks the child mid-write (this was the real effort-pin
                 // blocker; Linux's 64KB buffer masked it in testing).
-                val outFuture = com.dshlite.idea.util.ioAsync { process.inputStream.bufferedReader().readText() }
+                val outFuture = com.dshlite.idea.util.ioAsync { readUtf8Bounded(process.inputStream, MAX_SHELL_OUTPUT_BYTES) }
                 if (!process.waitFor(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                    process.destroyForcibly()
+                    destroyProcessTree(process, forcibly = true)
                     future.completeExceptionally(AcpException("target shell timed out"))
                     return@executeOnPooledThread
                 }
@@ -237,7 +240,7 @@ class AcpService(private val project: Project) : Disposable {
                 if (process.exitValue() != 0) throw AcpException("target shell exited ${process.exitValue()}")
                 future.complete(out)
             } catch (e: Exception) {
-                proc?.destroyForcibly()
+                proc?.let { destroyProcessTree(it, forcibly = true) }
                 future.completeExceptionally(e)
             }
         }
@@ -250,23 +253,24 @@ class AcpService(private val project: Project) : Disposable {
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
                 val spec = launcher().buildDoctorSpec()
-                val proc = ProcessBuilder(spec.command).redirectErrorStream(true).start()
+                val builder = ProcessBuilder(spec.command).redirectErrorStream(true)
+                spec.cwd?.let { builder.directory(java.io.File(it)) }
+                builder.environment().putAll(spec.env)
+                val proc = builder.start()
                 // See runTargetShell: one-shot wsl.exe probes must close stdin,
                 // and stdout must drain concurrently (pipe-buffer deadlock).
                 runCatching { proc.outputStream.close() }
-                val outFuture = com.dshlite.idea.util.ioAsync { proc.inputStream.readBytes() }
+                val outFuture = com.dshlite.idea.util.ioAsync { readBytesBounded(proc.inputStream, MAX_DOCTOR_OUTPUT_BYTES) }
                 if (!proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
-                    proc.destroyForcibly()
+                    destroyProcessTree(proc, forcibly = true)
                     future.completeExceptionally(AcpException("doctor timed out after 30s"))
                     return@executeOnPooledThread
                 }
                 val raw = outFuture.get(5, java.util.concurrent.TimeUnit.SECONDS)
                 val text = String(raw).replace("\r\n", "\n").trim()
-                // Self-diagnosing report: a blank body with the spec lets us see
-                // wsl.exe quoting/encoding breakage from a screenshot alone.
+                // Never include spec.command here: it can contain exported credentials.
                 val body = if (text.isEmpty()) {
-                    "(no output — exit=" + proc.exitValue() + ", bytes=" + raw.size + ", cmd: " +
-                        spec.command.joinToString(" ") { if (it.length > 120) it.take(120) + "…" else it } + ")"
+                    "(no output — exit=" + proc.exitValue() + ", bytes=" + raw.size + ")"
                 } else text
                 future.complete(body)
             } catch (e: Exception) {
@@ -282,6 +286,9 @@ class AcpService(private val project: Project) : Disposable {
     }
 
     companion object {
+        private const val MAX_SHELL_OUTPUT_BYTES = 32 * 1024 * 1024
+        private const val MAX_DOCTOR_OUTPUT_BYTES = 1024 * 1024
+
         fun getInstance(project: Project): AcpService = project.getService(AcpService::class.java)
 
         private fun pluginVersion(): String = runCatching {

@@ -34,6 +34,13 @@ class SessionHistoryTest {
         assertEquals("bad json", new.input!!.asString)
     }
 
+    @Test fun `marks tool calls without a durable result as interrupted`() {
+        val items = SessionHistory.parse(
+            """{"type":"tool/call","data":{"callId":"interrupted","name":"bash","arguments":"{}"}}"""
+        )
+        assertEquals("failed", (items.single() as HistoryMessage.Tool).status)
+    }
+
     @Test fun `imports only root log from archive and preserves the archive`() {
         val file = Files.createTempFile("dsh-history-", ".zip").toFile()
         try {
@@ -61,6 +68,15 @@ class SessionHistoryTest {
             }
             assertTrue(file.length() < 1024 * 1024)
             assertThrows(IllegalArgumentException::class.java) { SessionHistory.parseArchive(file) }
+        } finally { file.delete() }
+    }
+
+    @Test fun `rejects an oversized file before trying to parse it as ZIP`() {
+        val file = Files.createTempFile("dsh-history-oversized-", ".bin").toFile()
+        try {
+            java.io.RandomAccessFile(file, "rw").use { it.setLength(33L * 1024 * 1024) }
+            val error = assertThrows(IllegalArgumentException::class.java) { SessionHistory.parseArchive(file) }
+            assertTrue(error.message!!.contains("32 MiB"))
         } finally { file.delete() }
     }
 

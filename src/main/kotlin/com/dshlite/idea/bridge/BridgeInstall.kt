@@ -1,9 +1,11 @@
 /**
  * One-shot bridge installer/repairer, ported from dsh-lite-vscode
  * src/bridge/install.ts + installScript.ts. The bash template and the
- * cordis.patch.yml variants are vendored as resources (generated from the
- * VS Code sources, byte-identical); only __COMMAND__/__PKG__ are
- * interpolated at run time.
+ * cordis.patch.yml variants are vendored as resources. The patch variants
+ * remain byte-identical to the VS Code sources; the install script additionally
+ * reapplies the requested package spec so Repair also upgrades an older bridge.
+ * Only __COMMAND__ is interpolated at run time; the package spec is passed as
+ * a literal positional argument so shell substitution is never re-evaluated.
  *
  * Steps (all idempotent, executed by the script on the target side):
  *   1. create the acp-vscode profile from the acp template if missing
@@ -28,7 +30,7 @@ object BridgeInstall {
 
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(BridgeInstall::class.java)
 
-    const val BRIDGE_SPEC_CURRENT = "dsh-vscode-bridge@^0.3.0"
+    const val BRIDGE_SPEC_CURRENT = "dsh-vscode-bridge@^0.4.0"
     const val BRIDGE_SPEC_LEGACY = "dsh-vscode-bridge@^0.2.0"
 
     private fun resource(name: String): String =
@@ -43,38 +45,44 @@ object BridgeInstall {
     }
 
     fun buildVersionProbeScript(command: String): String =
-        "${com.dshlite.idea.launcher.ShellEnv.posixBootstrap()}; $command --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n1"
+        "$command --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n1"
 
     /** Assemble the full install script for the target side. */
-    fun buildInstallScript(command: String, pkg: String): String =
+    fun buildInstallScript(command: String): String =
         resource("install-template.sh")
             .replace("__PATCH_CURRENT__", resource("cordis-patch-current.yml"))
             .replace("__PATCH_PRESETS__", resource("cordis-preset-rows.yml"))
             .replace("__PATCH_LEGACY__", resource("cordis-patch-legacy.yml"))
             .replace("__COMMAND__", command)
-            .replace("__PKG__", pkg)
 
-    private fun targetShellArgs(): List<String> {
+    private fun targetShellArgs(arguments: List<String>, ideWorkspacePath: String?): List<String> {
         val s = DshSettingsState.getInstance()
-        val wsl = when (s.runtime) {
-            "wsl" -> true
-            "local" -> false
-            else -> SystemInfoRt.isWindows
-        }
-        return if (wsl) buildList {
+        val wsl = com.dshlite.idea.launcher.usesWsl(s.runtime, SystemInfoRt.isWindows)
+        val args = if (wsl) buildList {
             add("wsl.exe")
-            if (s.wslDistro.isNotBlank()) { add("-d"); add(s.wslDistro) }
+            val distro = com.dshlite.idea.launcher.wslDistroForWorkspace(s, ideWorkspacePath)
+            if (distro != null) { add("-d"); add(distro) }
             add("-e"); add("bash"); add("-s")
-        } else listOf("/bin/bash", "-s")
+        }.toMutableList() else mutableListOf("/bin/bash", "-s")
+        if (arguments.isNotEmpty()) {
+            args.add("--")
+            args.addAll(arguments)
+        }
+        return args
     }
 
     /** Run a shell script over stdin on the target side (not argv: the preset rows exceed the Windows argv limit). */
-    private fun runScript(script: String, timeoutMs: Long): CompletableFuture<Pair<String, String>> {
+    private fun runScript(
+        script: String,
+        timeoutMs: Long,
+        arguments: List<String> = emptyList(),
+        ideWorkspacePath: String? = null,
+    ): CompletableFuture<Pair<String, String>> {
         val future = CompletableFuture<Pair<String, String>>()
         ApplicationManager.getApplication().executeOnPooledThread {
             var proc: Process? = null
             try {
-                proc = ProcessBuilder(targetShellArgs()).start()
+                proc = ProcessBuilder(targetShellArgs(arguments, ideWorkspacePath)).start()
                 // Drain both streams concurrently: a full stderr pipe would block
                 // the child while we are still reading stdout (classic deadlock).
                 val process = proc
@@ -82,7 +90,12 @@ object BridgeInstall {
                 val stderrF = com.dshlite.idea.util.ioAsync("dsh-install-stderr") { process.errorStream.bufferedReader().readText() }
                 val stdin = OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8)
                 try {
-                    stdin.write(script)
+                    stdin.write(
+                        com.dshlite.idea.launcher.ShellEnv.withTargetEnvironment(
+                            script,
+                            DshSettingsState.getInstance().envMap(),
+                        )
+                    )
                     stdin.flush()
                 } finally {
                     runCatching { stdin.close() } // EPIPE when the child dies before reading
@@ -123,7 +136,7 @@ object BridgeInstall {
         // process and must not block the UI — move it off-EDT first.
         ApplicationManager.getApplication().executeOnPooledThread {
             val probed = bridge.hostDshVersion ?: runCatching {
-                runScript(buildVersionProbeScript(s.command), 30_000).get(35, TimeUnit.SECONDS).first.trim()
+                runScript(buildVersionProbeScript(s.command), 30_000, ideWorkspacePath = project.basePath).get(35, TimeUnit.SECONDS).first.trim()
             }.getOrNull()?.takeIf { it.isNotBlank() }
             val suggested = bridgeSpecForHost(probed)
             promptAndInstall(project, bridge, s, probed, suggested, onInstalled)
@@ -147,8 +160,8 @@ object BridgeInstall {
                 suggested,
                 null,
             ) ?: return@invokeLater
-            log.info("[install] starting: package=$pkg dsh=${probed ?: "unknown"}")
-            runScript(buildInstallScript(s.command, pkg), 180_000).whenComplete { out, error ->
+            log.info("[install] starting: dsh=${probed ?: "unknown"}")
+            runScript(buildInstallScript(s.command), 180_000, listOf(pkg), project.basePath).whenComplete { out, error ->
                 ApplicationManager.getApplication().invokeLater {
                     if (error != null) {
                         log.warn("[install] failed: ${error.message}")
@@ -161,7 +174,7 @@ object BridgeInstall {
                             .distinct()
                             .take(10)
                             .forEach { log.warn("[install] " + it.take(500)) }
-                        log.info("[install] completed: package=$pkg profile=acp-vscode")
+                        log.info("[install] completed: profile=acp-vscode")
                         s.profile = "acp-vscode"
                         Messages.showInfoMessage(
                             project,

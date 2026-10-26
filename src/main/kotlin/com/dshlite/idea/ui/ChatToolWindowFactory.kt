@@ -59,6 +59,10 @@ class ChatToolWindowFactory : ToolWindowFactory {
                     override fun getActionUpdateThread() = ActionUpdateThread.EDT
                 })
                 addSeparator()
+                add(object : DumbAwareAction(DshBundle.message("chat.importWebConfig")) {
+                    override fun actionPerformed(e: AnActionEvent) = panel.importWebConfigAction()
+                    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                })
                 add(object : DumbAwareAction(DshBundle.message("chat.reconnect")) {
                     override fun actionPerformed(e: AnActionEvent) = panel.reconnectAction()
                     override fun getActionUpdateThread() = ActionUpdateThread.EDT

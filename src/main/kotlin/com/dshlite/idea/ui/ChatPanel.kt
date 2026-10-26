@@ -57,6 +57,7 @@ class ChatPanel(
         }, com.intellij.openapi.application.ModalityState.any())
     }
     private val bridge = BridgeManager.getInstance(project)
+    private val configSyncFlow = com.dshlite.idea.bridge.ConfigSyncFlow(project, bridge, ::onConfigImported)
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(ChatPanel::class.java)
 
     /* ------------------------------ entries ------------------------------ */
@@ -89,6 +90,7 @@ class ChatPanel(
     )
     private val centerCards = JPanel(java.awt.CardLayout())
     private var showingWelcome = true
+    private var welcomeSessionsGeneration = 0L
 
     private val entries = ArrayList<Entry>()
     private val toolEntries = HashMap<String, ToolEntry>()
@@ -127,17 +129,45 @@ class ChatPanel(
 
     private data class PresetInfo(val id: String, val name: String, val isDefault: Boolean, val broken: String?)
 
-    /** Presets that can never run in a headless ACP session (mirrors dsh-lite-vscode). */
-    private val hostIncompatiblePresets = mapOf(
-        "cordis" to "Requires the Web/Desktop client plane (Cordis plugin runtime); unavailable in headless ACP sessions.",
-    )
-
     /** Presets the host rejected at mount time (learned, persisted app-wide). */
     private val failedPresets: MutableSet<String> by lazy {
         (com.intellij.ide.util.PropertiesComponent.getInstance()
             .getValue("dsh.brokenPresets") ?: "")
             .split(',').filter { it.isNotBlank() }.toMutableSet()
     }
+
+    /** Positive import evidence, scoped to this runtime/home/profile rather than bridge capability. */
+    private var cordisHostSupportImported: Boolean = run {
+        val profile = com.dshlite.idea.settings.DshSettingsState.getInstance().profile
+        com.intellij.ide.util.PropertiesComponent.getInstance()
+            .getValue(cordisSupportKey(profile)).toBoolean()
+    }
+
+    private fun cordisSupportKey(profile: String): String {
+        val s = com.dshlite.idea.settings.DshSettingsState.getInstance()
+        val identity = listOf(s.runtime, s.wslDistro, s.envMap()["DSH_HOME"].orEmpty(), profile)
+            .joinToString("\u0000")
+        val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(identity.toByteArray(Charsets.UTF_8))
+        return "dsh.cordisHostSupport.$encoded"
+    }
+
+    private fun onConfigImported(imported: com.dshlite.idea.bridge.ConfigSyncSummary) {
+        val importedPresets = imported.presets.toSet()
+        if (importedPresets.isEmpty()) return
+        if ("cordis" in importedPresets) {
+            com.intellij.ide.util.PropertiesComponent.getInstance()
+                .setValue(cordisSupportKey(imported.target), true)
+            val currentProfile = com.dshlite.idea.settings.DshSettingsState.getInstance().profile
+            if (imported.target == currentProfile) cordisHostSupportImported = true
+        }
+        if (failedPresets.removeAll(importedPresets)) {
+            com.intellij.ide.util.PropertiesComponent.getInstance()
+                .setValue("dsh.brokenPresets", failedPresets.joinToString(","))
+        }
+        refreshPresets()
+    }
+
     private data class PermissionMode(val value: String, val name: String)
 
     private var presets: List<PresetInfo> = emptyList()
@@ -145,6 +175,10 @@ class ChatPanel(
     private var permModes: List<PermissionMode> = emptyList()
     private var currentPermMode: String? = null
     @Volatile private var bridgeSubscribedSession: String? = null
+    @Volatile private var bridgeSubscribedClient: com.dshlite.idea.bridge.BridgeClient? = null
+    private val bridgeAttachExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "dsh-bridge-attach").apply { isDaemon = true }
+    }
 
     /* --------------------- slash commands & skills ----------------------- */
 
@@ -183,6 +217,7 @@ class ChatPanel(
                     presets = emptyList(); permModes = emptyList()
                     nativeCommands = emptyList(); skills = emptyList()
                     bridgeSubscribedSession = null // force resubscribe after a bridge reconnect
+                    bridgeSubscribedClient = null
                     rebuildConfigBar()
                     updateSlashPopup()
                 }
@@ -368,6 +403,7 @@ class ChatPanel(
     fun openSessionsAction() = openSessions()
     fun showSkillsDialogAction() = showSkillsDialog()
     fun exportSessionAction() = exportSession()
+    fun importWebConfigAction() = configSyncFlow.run()
     fun reconnectAction() = reconnect()
     fun runDoctorAction() = runDoctor()
     fun installBridgeAction() {
@@ -385,17 +421,24 @@ class ChatPanel(
         if (!bridge.isOn) return
         val c = bridge.client ?: return
         val caps = bridge.capabilities
-        ApplicationManager.getApplication().executeOnPooledThread {
-            if (bridgeSubscribedSession != id) {
-                runCatching { c.request("session.unsubscribe").get(5, java.util.concurrent.TimeUnit.SECONDS) }
+        // Serialize unsubscribe/subscribe pairs in the order session switches
+        // were initiated. A slow A can finish before the queued B, but can no
+        // longer overwrite B's later subscription.
+        bridgeAttachExecutor.execute {
+            if (disposed || sessionId != id || bridge.client !== c) return@execute
+            if (bridgeSubscribedSession != id || bridgeSubscribedClient !== c) {
+                runCatching { c.request("session.unsubscribe", timeoutMs = 5_000).get(5, java.util.concurrent.TimeUnit.SECONDS) }
                 runCatching {
-                    c.request("session.subscribe", JsonObject().apply { addProperty("sessionId", id) })
+                    c.request("session.subscribe", JsonObject().apply { addProperty("sessionId", id) }, 5_000)
                         .get(5, java.util.concurrent.TimeUnit.SECONDS)
-                }.onSuccess { bridgeSubscribedSession = id }
+                }.onSuccess {
+                    bridgeSubscribedSession = id
+                    bridgeSubscribedClient = c
+                }
             }
             if (caps?.workspaceGrouping == true) {
                 runCatching {
-                    c.request("workspace.attach", JsonObject().apply { addProperty("sessionId", id) })
+                    c.request("workspace.attach", JsonObject().apply { addProperty("sessionId", id) }, 5_000)
                         .get(5, java.util.concurrent.TimeUnit.SECONDS)
                 }
             }
@@ -411,7 +454,7 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val res = runCatching {
-                c.request("command.list", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("command.list", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.getOrNull() ?: return@executeOnPooledThread
             val parsed = res.getAsJsonArray("commands")?.mapNotNull { el ->
@@ -442,7 +485,7 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val res = runCatching {
-                c.request("skill.list", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("skill.list", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.getOrNull() ?: return@executeOnPooledThread
             val parsed = res.getAsJsonArray("skills")?.mapNotNull { el ->
@@ -594,7 +637,7 @@ class ChatPanel(
                 val res = c.request("command.run", JsonObject().apply {
                     addProperty("sessionId", id)
                     addProperty("line", line)
-                }).get(120, java.util.concurrent.TimeUnit.SECONDS)
+                }, 120_000).get(120, java.util.concurrent.TimeUnit.SECONDS)
                 val kind = res?.get("kind")?.takeIf { it.isJsonPrimitive }?.asString ?: "success"
                 val text = res?.get("text")?.takeIf { it.isJsonPrimitive }?.asString
                 onEdt {
@@ -655,25 +698,27 @@ class ChatPanel(
         addSystemMessage(DshBundle.message("export.running"))
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val res = c.request("session.exportZip", JsonObject().apply { addProperty("sessionId", id) })
+                val res = c.request("session.exportZip", JsonObject().apply { addProperty("sessionId", id) }, 120_000)
                     .get(120, java.util.concurrent.TimeUnit.SECONDS)
                 val path = res?.get("path")?.takeIf { it.isJsonPrimitive }?.asString
                 if (path == null) {
-                    onEdt { addError(DshBundle.message("export.failed", "no path in response")) }
+                    onEdt { if (sessionId == id) addError(DshBundle.message("export.failed", "no path in response")) }
                     return@executeOnPooledThread
                 }
                 val bytes = res.get("bytes")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0
                 // The zip path is dsh-side; map it back to the IDE side for reveal/copy.
                 val hostPath = com.dshlite.idea.launcher.createLauncher(
-                    com.dshlite.idea.settings.DshSettingsState.getInstance()
+                    com.dshlite.idea.settings.DshSettingsState.getInstance(),
+                    project.basePath,
                 ).fromDshPath(path)
                 val size = if (bytes > 1024 * 1024) "%.1f MB".format(bytes / 1024.0 / 1024.0)
                 else "${maxOf(1, bytes / 1024)} KB"
-                onEdt { showExportResult(hostPath, size) }
+                onEdt { if (sessionId == id) showExportResult(hostPath, size) }
             } catch (e: Exception) {
                 val isTooOld = (e as? java.util.concurrent.ExecutionException)?.cause
                     ?.let { it is com.dshlite.idea.bridge.BridgeException && it.rpcCode == -32601 } == true
                 onEdt {
+                    if (sessionId != id) return@onEdt
                     addError(
                         if (isTooOld) DshBundle.message("cmd.bridgeTooOld")
                         else DshBundle.message("export.failed", rootMessage(e))
@@ -713,10 +758,10 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val list = runCatching {
-                c.request("preset.list").get(10, java.util.concurrent.TimeUnit.SECONDS)
+                c.request("preset.list", timeoutMs = 10_000).get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.getOrNull()
             val curResult = runCatching {
-                c.request("preset.current", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("preset.current", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }
             // The bridge learns a fresh session asynchronously; "not live" right
@@ -737,9 +782,13 @@ class ChatPanel(
                     id = pid,
                     name = o.get("name")?.takeIf { it.isJsonPrimitive }?.asString ?: pid,
                     isDefault = o.get("isDefault")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false,
-                    broken = hostIncompatiblePresets[pid]
-                        ?: o.get("broken")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
-                        ?: if (pid in failedPresets) "failed to mount previously" else null,
+                    broken = effectivePresetBrokenReason(
+                        id = pid,
+                        hostSupportImported = cordisHostSupportImported,
+                        nativeBroken = o.get("broken")
+                            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString,
+                        failedPreviously = pid in failedPresets,
+                    ),
                 )
             } ?: return@executeOnPooledThread
             // First start reports null: fall back to the roster default ("standard").
@@ -779,7 +828,7 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val resResult = runCatching {
-                c.request("permission.get", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("permission.get", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }
             val resErr = resResult.exceptionOrNull()
@@ -814,7 +863,7 @@ class ChatPanel(
                 c.request("preset.select", JsonObject().apply {
                     addProperty("sessionId", id)
                     addProperty("presetId", presetId)
-                }).get(10, java.util.concurrent.TimeUnit.SECONDS)
+                }, 10_000).get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.onFailure { e ->
                 // Mount-time failures are not flagged by the roster — learn them
                 // (bridge forwards agent-preset/invalid as data.code since 0.1.3;
@@ -843,7 +892,7 @@ class ChatPanel(
                 val res = c.request("permission.set", JsonObject().apply {
                     addProperty("sessionId", id)
                     addProperty("name", name)
-                }).get(10, java.util.concurrent.TimeUnit.SECONDS)
+                }, 10_000).get(10, java.util.concurrent.TimeUnit.SECONDS)
                 val current = res?.get("current")?.takeIf { !it.isJsonNull }?.asString
                 onEdt {
                     if (sessionId != id || bridge.client !== c) return@onEdt
@@ -887,7 +936,7 @@ class ChatPanel(
             c.request("session.setTitle", JsonObject().apply {
                 addProperty("sessionId", id)
                 addProperty("title", title)
-            }).orTimeout(15, java.util.concurrent.TimeUnit.SECONDS).whenComplete { _, err ->
+            }, 15_000).whenComplete { _, err ->
                 val cause = (err as? java.util.concurrent.ExecutionException)?.cause ?: err
                 if (cause == null) {
                     onEdt {
@@ -926,7 +975,7 @@ class ChatPanel(
             f.completeExceptionally(com.dshlite.idea.bridge.BridgeException("bridge is not connected", -32000, null))
             return f
         }
-        c.request("session.delete", JsonObject().apply { addProperty("sessionId", id) }).whenComplete { _, err ->
+        c.request("session.delete", JsonObject().apply { addProperty("sessionId", id) }, 15_000).whenComplete { _, err ->
             val cause = (err as? java.util.concurrent.ExecutionException)?.cause ?: err
             if (cause is com.dshlite.idea.bridge.BridgeException && cause.dataCode == "session/active") {
                 f.completeExceptionally(com.dshlite.idea.bridge.BridgeException(
@@ -1028,8 +1077,14 @@ class ChatPanel(
         attachSession(newId)
         currentTitle = title
         configOptions = emptyList()
+        presets = emptyList()
+        permModes = emptyList()
+        nativeCommands = emptyList()
+        skills = emptyList()
         currentPreset = null
         currentPermMode = null
+        rebuildConfigBar()
+        updateSlashPopup()
         usageLabel.text = " "
         clearEntries()
         updateTitle()
@@ -1074,7 +1129,7 @@ class ChatPanel(
     private fun loadTranscript(id: String) {
         val epoch = sessionEpoch
         val client = bridge.client?.takeIf { bridge.isOn && bridge.capabilities?.sessionExport == true }
-        val launcher = com.dshlite.idea.launcher.createLauncher(com.dshlite.idea.settings.DshSettingsState.getInstance())
+        val launcher = com.dshlite.idea.launcher.createLauncher(com.dshlite.idea.settings.DshSettingsState.getInstance(), project.basePath)
         ApplicationManager.getApplication().executeOnPooledThread {
             var failure: Throwable? = null
             var source = "bridge"
@@ -1137,13 +1192,20 @@ class ChatPanel(
                 is com.dshlite.idea.chat.HistoryMessage.Thought ->
                     put(Entry(ThoughtCard().apply { setText(m.text) }))
                 is com.dshlite.idea.chat.HistoryMessage.Tool -> {
-                    val card = ToolCard(
-                        ToolCard.ToolState(
-                            title = m.title, subtitle = m.subtitle, status = m.status,
-                            input = m.input, detail = m.detail,
+                    // A live update may have arrived while the log was loading.
+                    // Keep that newer card; otherwise register the restored one
+                    // so later updates and repeated tool_call frames find it.
+                    if (!toolEntries.containsKey(m.id)) {
+                        val card = ToolCard(
+                            ToolCard.ToolState(
+                                title = m.title, subtitle = m.subtitle, status = m.status,
+                                input = m.input, detail = m.detail,
+                            )
                         )
-                    )
-                    put(ToolEntry(card))
+                        val entry = ToolEntry(card)
+                        toolEntries[m.id] = entry
+                        put(entry)
+                    }
                 }
             }
         }
@@ -1219,9 +1281,12 @@ class ChatPanel(
     /** Fill the welcome panel's recent-session list (best effort, agent boots for this). */
     private fun loadWelcomeSessions() {
         if (!showingWelcome) return
+        val generation = ++welcomeSessionsGeneration
         fetchSessions().whenComplete { list, err ->
             onEdt {
-                if (err == null && showingWelcome) welcomePanel.setSessions(list)
+                if (err == null && generation == welcomeSessionsGeneration && showingWelcome) {
+                    welcomePanel.setSessions(list.filter { it.sessionId !in archivedLocal() })
+                }
             }
         }
     }
@@ -1271,20 +1336,25 @@ class ChatPanel(
                     addSystemMessage(DshBundle.message("chat.noSessions"))
                     return@onEdt
                 }
+                var refreshGeneration = 0L
                 val dialog = SessionsDialog(project, list, bridgeSessionOps(), currentId = sessionId) { onChanged ->
                     // Rename/delete landed: refresh the welcome list now, and
                     // re-list for the dialog after a beat (the host applies the
-                    // archive asynchronously).
-                    loadWelcomeSessions()
-                    fetchSessions().whenComplete { fresh, err ->
-                        onEdt { if (err == null && fresh != null) onChanged(fresh) }
-                    }
-                    Timer(800) {
-                        if (!disposed) {
-                            fetchSessions().whenComplete { fresh, err ->
-                                onEdt { if (err == null && fresh != null) onChanged(fresh) }
+                    // archive asynchronously). Only the newest request may apply.
+                    fun refresh() {
+                        val generation = ++refreshGeneration
+                        fetchSessions().whenComplete { fresh, err ->
+                            onEdt {
+                                if (err == null && fresh != null && generation == refreshGeneration) {
+                                    onChanged(fresh.filter { it.sessionId !in archivedLocal() })
+                                }
                             }
                         }
+                    }
+                    loadWelcomeSessions()
+                    refresh()
+                    Timer(800) {
+                        if (!disposed) refresh()
                     }.apply { isRepeats = false; start() }
                 }
                 if (dialog.showAndGet()) {
@@ -1324,8 +1394,9 @@ class ChatPanel(
                     loadTranscript(id)
                 }
                 if (options != null) {
+                    // Resumed sessions keep their own model/effort. Remembered
+                    // selections are only defaults for freshly created sessions.
                     applyConfigOptions(options)
-                    applyRememberedSelection()
                 } else {
                     refreshPresets()
                     refreshPermissions()
@@ -1378,7 +1449,7 @@ class ChatPanel(
             is SlashLine.Skill -> {
                 // Skills are invoked through the model: ask it to use the skill.
                 composer.text = ""
-                sendPrompt("请使用 ${slash.name} 技能${if (slash.rest.isNotEmpty()) "：${slash.rest}" else ""}")
+                sendPrompt("请使用 ${slash.name} 技能${if (slash.rest.isNotEmpty()) "：${slash.rest}" else ""}", draftText = text)
                 return
             }
             null -> {}
@@ -1387,19 +1458,32 @@ class ChatPanel(
         sendPrompt(text)
     }
 
-    private fun sendPrompt(text: String) {
-        setBusy(true)
+    private fun sendPrompt(text: String, draftText: String = text) {
         var turnSessionId: String? = null
+        var userMessageAdded = false
         val files = pendingFiles.toMap()
         pendingFiles.clear()
 
         val sid = sessionId
+        val creationRequest = if (sid == null) Any().also { sessionRequest = it } else null
+        setBusy(true)
         val promptFuture = if (sid != null) {
             java.util.concurrent.CompletableFuture.completedFuture(sid)
         } else {
             service.newSession().thenCompose { result ->
                 val ready = java.util.concurrent.CompletableFuture<String>()
                 onEdt {
+                    if (sessionRequest !== creationRequest) {
+                        // A newer explicit new/resume owns the UI now. Do not clear
+                        // its transcript or steal its target; discard only the
+                        // superseded empty session created for this send.
+                        service.closeSession(result.sessionId)
+                        ready.completeExceptionally(
+                            java.util.concurrent.CancellationException("session creation was superseded")
+                        )
+                        return@onEdt
+                    }
+                    sessionRequest = null
                     switchSession(result.sessionId)
                     markSessionUsed(result.sessionId)
                     markSessionClean()
@@ -1420,6 +1504,8 @@ class ChatPanel(
                 onEdt {
                     turnSessionId = id
                     busySessionId = id
+                    userMessageAdded = true
+                    markSessionDirty(id)
                     addUserMessage(text)
                     f.complete(id)
                 }
@@ -1430,11 +1516,13 @@ class ChatPanel(
                 val blocks = ArrayList<ContentBlock>()
                 // Referenced @-files cross to the dsh side as resource links.
                 val launcher = com.dshlite.idea.launcher.createLauncher(
-                    com.dshlite.idea.settings.DshSettingsState.getInstance()
+                    com.dshlite.idea.settings.DshSettingsState.getInstance(),
+                    project.basePath,
                 )
+                val referencedNames = referencedMentionNames(text, files.keys)
                 for ((name, path) in files) {
-                    if (text.contains("@" + name)) {
-                        blocks.add(ContentBlock.resourceLink("file://" + launcher.toDshPath(path), name))
+                    if (name in referencedNames) {
+                        blocks.add(ContentBlock.resourceLink(launcher.toDshResourceUri(path), name))
                     }
                 }
                 blocks.add(ContentBlock.text(text))
@@ -1442,8 +1530,15 @@ class ChatPanel(
             }
             .whenComplete { _, error ->
                 onEdt {
+                    if (sessionRequest === creationRequest) sessionRequest = null
                     setBusy(false)
-                    if (sessionId == turnSessionId || turnSessionId == null) {
+                    val cancelled = isCancellation(error)
+                    if (error != null && !userMessageAdded && composer.text.isBlank()) {
+                        composer.text = draftText
+                        composer.caretPosition = composer.text.length
+                        files.forEach { (name, path) -> pendingFiles.putIfAbsent(name, path) }
+                    }
+                    if (!cancelled && (sessionId == turnSessionId || turnSessionId == null)) {
                         endStreaming()
                         if (error != null) addError(DshBundle.message("chat.promptFailed", rootMessage(error)))
                     }
@@ -1469,7 +1564,7 @@ class ChatPanel(
     private fun applyUpdate(u: SessionUpdateData) {
         // Only real conversation content makes a session "dirty" for the
         // blank-session reuse rule — config/usage updates don't count.
-        if (u.kind in setOf("agent_message_chunk", "agent_thought_chunk", "tool_call")) {
+        if (u.kind in setOf("agent_message_chunk", "agent_thought_chunk", "user_message_chunk", "tool_call")) {
             sessionId?.let { markSessionDirty(it) }
         }
         when (u.kind) {
@@ -1773,7 +1868,7 @@ class ChatPanel(
         try {
             configBar.removeAll()
             railSelects = emptyMap()
-            configBar.isVisible = true
+            configBar.isVisible = false
             permissionButton.isVisible = permModes.isNotEmpty()
 
             // Rail order: preset → model → reasoning effort (…then any extras).
@@ -1787,6 +1882,7 @@ class ChatPanel(
                 configBar.add(buildOptionSelect(opt))
             }
 
+            configBar.isVisible = configBar.componentCount > 0
             configBar.revalidate()
             configBar.repaint()
         } finally {
@@ -1899,13 +1995,18 @@ class ChatPanel(
         }
     }
 
-    private fun rootMessage(t: Throwable): String {
+    private fun rootCause(t: Throwable): Throwable {
         var cause = t
         while (cause is java.util.concurrent.CompletionException || cause is java.util.concurrent.ExecutionException) {
             cause = cause.cause ?: break
         }
-        return cause.message ?: cause.toString()
+        return cause
     }
+
+    private fun isCancellation(t: Throwable?): Boolean =
+        t != null && rootCause(t) is java.util.concurrent.CancellationException
+
+    private fun rootMessage(t: Throwable): String = rootCause(t).let { it.message ?: it.toString() }
 
     override fun dispose() {
         disposed = true
@@ -1917,6 +2018,7 @@ class ChatPanel(
         updateListener?.let(service::removeUpdateListener)
         service.removeStateListener(stateListener)
         bridge.removeListener(bridgeListener)
+        bridgeAttachExecutor.shutdownNow()
         if (service.permissionResponder != null) service.permissionResponder = null
     }
 }

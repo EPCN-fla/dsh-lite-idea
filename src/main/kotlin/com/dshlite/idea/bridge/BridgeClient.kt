@@ -9,10 +9,10 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.dshlite.idea.util.AsyncLineWriter
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.io.Writer
 import java.net.InetAddress
 import java.net.Socket
 import java.nio.charset.StandardCharsets
@@ -33,6 +33,8 @@ data class BridgeCapabilities(
     val commands: Boolean = false,
     val skills: Boolean = false,
     val sessionExport: Boolean = false,
+    /** bridge 0.4.0+: explicit Web model/preset import. Absent on older bridges. */
+    val configSync: Boolean = false,
 )
 
 data class BridgeHandshake(
@@ -55,7 +57,7 @@ data class BridgeDiscoveryEntry(
 class BridgeClient private constructor(
     private val socket: Socket,
     private val token: String,
-) {
+) : ConfigSyncRpc {
     companion object {
         private val gson: Gson = GsonBuilder().disableHtmlEscaping().create()
 
@@ -75,7 +77,7 @@ class BridgeClient private constructor(
             client.onClose = onClose
             client.startReader()
             try {
-                val hs = client.request("bridge.handshake", JsonObject()).get(timeoutMs, TimeUnit.MILLISECONDS)
+                val hs = client.request("bridge.handshake", JsonObject(), timeoutMs).get(timeoutMs, TimeUnit.MILLISECONDS)
                 val caps = hs?.get("capabilities") as? JsonObject
                 client.handshake = BridgeHandshake(
                     plugin = hs?.str("plugin"),
@@ -91,6 +93,7 @@ class BridgeClient private constructor(
                         commands = caps.bool("commands"),
                         skills = caps.bool("skills"),
                         sessionExport = caps.bool("sessionExport"),
+                        configSync = caps.bool("configSync"),
                     ),
                 )
             } catch (e: Exception) {
@@ -118,13 +121,22 @@ class BridgeClient private constructor(
     @Volatile
     var onClose: () -> Unit = {}
 
-    private val writer: Writer = OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)
+    private val writer = AsyncLineWriter(
+        OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8),
+        "dsh-bridge-writer",
+    )
+    private val timeoutScheduler = java.util.concurrent.ScheduledThreadPoolExecutor(1) { r ->
+        Thread(r, "dsh-bridge-timeouts").apply { isDaemon = true }
+    }.apply {
+        removeOnCancelPolicy = true
+        executeExistingDelayedTasksAfterShutdownPolicy = false
+    }
     private val pending = ConcurrentHashMap<Long, CompletableFuture<JsonObject?>>()
     private val nextId = AtomicLong(1)
     @Volatile
     var isOpen = true; private set
 
-    val capabilities: BridgeCapabilities? get() = handshake?.capabilities
+    override val capabilities: BridgeCapabilities? get() = handshake?.capabilities
 
     private fun startReader() {
         Thread({
@@ -177,8 +189,10 @@ class BridgeClient private constructor(
     private fun handleClose() {
         isOpen = false
         if (!closeHandled.compareAndSet(false, true)) return
-        runCatching { socket.close() }
         failPending()
+        writer.shutdown()
+        runCatching { socket.close() }
+        timeoutScheduler.shutdownNow()
         runCatching { onClose() }
     }
 
@@ -187,7 +201,7 @@ class BridgeClient private constructor(
         pending.keys.toList().forEach { id -> pending.remove(id)?.completeExceptionally(e) }
     }
 
-    fun request(method: String, params: JsonObject? = null): CompletableFuture<JsonObject?> {
+    override fun request(method: String, params: JsonObject?, timeoutMs: Long?): CompletableFuture<JsonObject?> {
         if (!isOpen) {
             return CompletableFuture<JsonObject?>().also {
                 it.completeExceptionally(BridgeException("bridge connection closed", -32000, null))
@@ -196,7 +210,26 @@ class BridgeClient private constructor(
         val id = nextId.getAndIncrement()
         val f = CompletableFuture<JsonObject?>()
         pending[id] = f
-        f.whenComplete { _, _ -> pending.remove(id, f) }
+        val timeout = try {
+            timeoutMs?.let { delay ->
+                timeoutScheduler.schedule({
+                    if (pending.remove(id, f)) {
+                        f.completeExceptionally(BridgeException("bridge request timed out", -32000, "bridge/timeout"))
+                    }
+                }, delay, TimeUnit.MILLISECONDS)
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // close() can shut down the scheduler between the isOpen check and
+            // registration. Complete normally instead of throwing synchronously
+            // into UI flows and leaving their running state latched.
+            pending.remove(id)
+            f.completeExceptionally(BridgeException("bridge connection closed", -32000, null))
+            return f
+        }
+        f.whenComplete { _, _ ->
+            pending.remove(id, f)
+            timeout?.cancel(false)
+        }
         if (!isOpen) {
             // Closed between the check and the registration (see close()).
             failPending()
@@ -210,10 +243,9 @@ class BridgeClient private constructor(
             addProperty("token", token)
         }
         try {
-            synchronized(writer) {
-                writer.write(gson.toJson(frame))
-                writer.write("\n")
-                writer.flush()
+            writer.writeLine(gson.toJson(frame)) { e ->
+                pending.remove(id)
+                f.completeExceptionally(e)
             }
         } catch (e: Exception) {
             pending.remove(id)
@@ -231,7 +263,9 @@ class BridgeClient private constructor(
     fun close() {
         isOpen = false
         closeHandled.set(true)
-        runCatching { socket.close() }
         failPending()
+        writer.shutdown()
+        runCatching { socket.close() }
+        timeoutScheduler.shutdownNow()
     }
 }

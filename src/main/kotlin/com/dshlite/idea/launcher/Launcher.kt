@@ -23,8 +23,8 @@ interface Launcher {
     /** Human-readable topology label for diagnostics, e.g. "windows-host -> wsl". */
     val label: String
 
-    /** Build the spawn spec for the ACP server, given the dsh-side workspace cwd. */
-    fun buildLaunchSpec(dshWorkspaceCwd: String): LaunchSpec
+    /** Build the spawn spec for the ACP server, given the IDE-side workspace path. */
+    fun buildLaunchSpec(ideWorkspacePath: String): LaunchSpec
 
     /** Diagnostic probe spec (used by the Doctor action). */
     fun buildDoctorSpec(): LaunchSpec
@@ -37,6 +37,9 @@ interface Launcher {
 
     /** dsh-side absolute path -> IDE-side absolute path. */
     fun fromDshPath(p: String): String
+
+    /** IDE-side file path -> a correctly encoded ACP resource_link URI. */
+    fun toDshResourceUri(p: String): String
 }
 
 /** Target-side shell bootstrap: make version-manager-managed Node.js visible to non-interactive shells. */
@@ -59,8 +62,9 @@ object ShellEnv {
 
     /** Labels and probes on separate lines: no $( ) command substitution, which
      *  is the only construct that broke on the user's wsl.exe invocation path. */
-    fun posixDoctor(): String = listOf(
+    fun posixDoctor(env: Map<String, String> = emptyMap()): String = listOf(
         posixBootstrap(),
+        exports(env),
         "echo 'node:'; command -v node || echo MISSING; node --version 2>&1 | head -1",
         "echo 'npx:'; command -v npx || echo MISSING",
         "echo 'dsh:'; command -v dsh || echo MISSING",
@@ -68,34 +72,71 @@ object ShellEnv {
     ).joinToString("; ") + SHORT_CMD_SETTLE
 
     fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+
+    fun exports(env: Map<String, String>): String = env.entries.joinToString(" ") { (key, value) ->
+        "export $key=${shellQuote(value)};"
+    }
+
+    /** Bootstrap used by one-shot stdin scripts before the script body. */
+    fun withTargetEnvironment(script: String, env: Map<String, String>): String =
+        posixBootstrap() + "; " + exports(env) + "\n" + script
 }
 
+internal fun posixFileUri(path: String): String =
+    java.net.URI("file", "", path, null, null).toASCIIString()
+
+internal data class WslPathMapping(val path: String, val distro: String?)
+
 /** Map Windows drive and WSL UNC paths without starting wsl.exe on the EDT. */
-internal fun toWslPath(path: String): String {
+internal fun mapWslPath(path: String): WslPathMapping {
     val normalized = path.replace('\\', '/')
     val drive = Regex("^([A-Za-z]):/(.*)$").matchEntire(normalized)
-    if (drive != null) return "/mnt/${drive.groupValues[1].lowercase()}/${drive.groupValues[2]}"
-    // Both hosts expose the distro's root directly. The distro name is not
-    // part of the Linux path; no call to wslpath is needed.
-    val unc = Regex("^//(?:wsl\\.localhost|wsl\\$)/[^/]+(?:/(.*))?$", RegexOption.IGNORE_CASE)
+    if (drive != null) {
+        return WslPathMapping("/mnt/${drive.groupValues[1].lowercase()}/${drive.groupValues[2]}", null)
+    }
+    // The UNC carries both the distro and its root path. Keep the distro for
+    // process launch instead of silently opening the same path in another WSL.
+    val unc = Regex("^//(?:wsl\\.localhost|wsl\\$)/([^/]+)(?:/(.*))?$", RegexOption.IGNORE_CASE)
         .matchEntire(normalized)
-    return if (unc != null) "/" + unc.groupValues[1] else path
+    return if (unc != null) {
+        WslPathMapping("/" + unc.groupValues[2], unc.groupValues[1])
+    } else WslPathMapping(path, null)
+}
+
+internal fun toWslPath(path: String): String = mapWslPath(path).path
+
+internal fun wslDistroForWorkspace(settings: DshSettingsState, ideWorkspacePath: String?): String? {
+    val configured = settings.wslDistro.trim().takeIf { it.isNotEmpty() }
+    val unc = ideWorkspacePath?.let { mapWslPath(it).distro }
+    if (unc != null) {
+        require(configured == null || configured.equals(unc, ignoreCase = true)) {
+            "WSL distro mismatch: the project is in '$unc' but settings select '$configured'."
+        }
+    }
+    return unc ?: configured
 }
 
 /** Case 2: IDE on Windows, dsh inside WSL. stdio pipes forwarded through wsl.exe. */
-class WslLauncher(private val settings: DshSettingsState) : Launcher {
+class WslLauncher(
+    private val settings: DshSettingsState,
+    private val ideWorkspacePath: String? = null,
+) : Launcher {
     override val label = "windows-host -> wsl"
 
-    private fun wslArgs(innerBash: String): List<String> = buildList {
+    private fun wslArgs(
+        innerBash: String,
+        distro: String? = wslDistroForWorkspace(settings, ideWorkspacePath),
+    ): List<String> = buildList {
         add("wsl.exe")
-        if (settings.wslDistro.isNotBlank()) { add("-d"); add(settings.wslDistro) }
+        if (distro != null) { add("-d"); add(distro) }
         add("-e"); add("bash"); add("-lc"); add(innerBash)
     }
 
-    override fun buildLaunchSpec(dshWorkspaceCwd: String): LaunchSpec {
-        val exports = settings.envMap().entries.joinToString(" ") { (k, v) ->
-            "export $k=${ShellEnv.shellQuote(v)};"
-        }
+    override fun buildLaunchSpec(ideWorkspacePath: String): LaunchSpec {
+        val mapping = mapWslPath(ideWorkspacePath)
+        val dshWorkspaceCwd = mapping.path
+        val distro = wslDistroForWorkspace(settings, ideWorkspacePath)
+        val exports = ShellEnv.exports(settings.envMap())
         val inner = buildString {
             append(ShellEnv.posixBootstrap()).append("; ")
             if (exports.isNotEmpty()) append(exports).append(' ')
@@ -103,19 +144,21 @@ class WslLauncher(private val settings: DshSettingsState) : Launcher {
             append(" && exec ").append(settings.command)
             append(" --profile ").append(ShellEnv.shellQuote(settings.profile))
         }
-        return LaunchSpec(wslArgs(inner))
+        return LaunchSpec(wslArgs(inner, distro))
     }
 
-    override fun buildDoctorSpec(): LaunchSpec = LaunchSpec(wslArgs(ShellEnv.posixDoctor()))
+    override fun buildDoctorSpec(): LaunchSpec = LaunchSpec(wslArgs(ShellEnv.posixDoctor(settings.envMap())))
 
     override fun buildShellSpec(script: String): LaunchSpec {
-        val exports = settings.envMap().entries.joinToString(" ") { (key, value) -> "export $key=${ShellEnv.shellQuote(value)};" }
+        val exports = ShellEnv.exports(settings.envMap())
         return LaunchSpec(wslArgs("$exports $script"))
     }
 
     private val wslMount = Regex("""^/mnt/([a-z])/(.*)$""")
 
     override fun toDshPath(p: String): String = toWslPath(p)
+
+    override fun toDshResourceUri(p: String): String = posixFileUri(toDshPath(p))
 
     override fun fromDshPath(p: String): String {
         val m = wslMount.matchEntire(p)
@@ -128,7 +171,8 @@ class WslLauncher(private val settings: DshSettingsState) : Launcher {
     private fun wslPath(p: String, flag: String): String? = runCatching {
         val args = buildList {
             add("wsl.exe")
-            if (settings.wslDistro.isNotBlank()) { add("-d"); add(settings.wslDistro) }
+            val distro = wslDistroForWorkspace(settings, ideWorkspacePath)
+            if (distro != null) { add("-d"); add(distro) }
             add("-e"); add("wslpath"); add(flag); add(p)
         }
         val proc = ProcessBuilder(args).redirectErrorStream(true).start()
@@ -145,7 +189,8 @@ class WslLauncher(private val settings: DshSettingsState) : Launcher {
 class LocalLauncher(private val settings: DshSettingsState) : Launcher {
     override val label = "local (${SystemInfoRt.OS_NAME})"
 
-    override fun buildLaunchSpec(dshWorkspaceCwd: String): LaunchSpec {
+    override fun buildLaunchSpec(ideWorkspacePath: String): LaunchSpec {
+        val dshWorkspaceCwd = toDshPath(ideWorkspacePath)
         if (SystemInfoRt.isWindows) {
             // Native Windows dsh: no posix bootstrap; cmd.exe resolves npx .cmd shims.
             // cwd goes through the ProcessBuilder, not a cd, to keep quoting simple.
@@ -157,7 +202,7 @@ class LocalLauncher(private val settings: DshSettingsState) : Launcher {
         }
         val inner = buildString {
             append(ShellEnv.posixBootstrap()).append("; ")
-            val exports = settings.envMap().entries.joinToString(" ") { (k, v) -> "export $k=${ShellEnv.shellQuote(v)};" }
+            val exports = ShellEnv.exports(settings.envMap())
             if (exports.isNotEmpty()) append(exports).append(' ')
             append("cd ").append(ShellEnv.shellQuote(dshWorkspaceCwd))
             append(" && exec ").append(settings.command)
@@ -168,9 +213,12 @@ class LocalLauncher(private val settings: DshSettingsState) : Launcher {
 
     override fun buildDoctorSpec(): LaunchSpec {
         if (SystemInfoRt.isWindows) {
-            return LaunchSpec(listOf("cmd.exe", "/c", "where node & node --version & where dsh & cd"))
+            return LaunchSpec(
+                listOf("cmd.exe", "/c", "where node & node --version & where dsh & cd"),
+                env = settings.envMap(),
+            )
         }
-        return LaunchSpec(listOf("/bin/sh", "-lc", ShellEnv.posixDoctor()))
+        return LaunchSpec(listOf("/bin/sh", "-lc", ShellEnv.posixDoctor(settings.envMap())), env = settings.envMap())
     }
 
     override fun buildShellSpec(script: String): LaunchSpec? =
@@ -179,6 +227,10 @@ class LocalLauncher(private val settings: DshSettingsState) : Launcher {
 
     override fun toDshPath(p: String): String = File(p).absolutePath
     override fun fromDshPath(p: String): String = p
+    override fun toDshResourceUri(p: String): String {
+        val path = toDshPath(p)
+        return if (SystemInfoRt.isWindows) File(path).toURI().toASCIIString() else posixFileUri(path)
+    }
 }
 
 /**
@@ -189,10 +241,12 @@ class LocalLauncher(private val settings: DshSettingsState) : Launcher {
  *                                  when the IDE backend itself runs inside WSL)
  * "local" is accepted as a legacy alias for the same-side/native launch.
  */
-fun createLauncher(settings: DshSettingsState): Launcher {
-    if (!SystemInfoRt.isWindows) return LocalLauncher(settings)
-    return when (settings.runtime) {
-        "windows", "local" -> LocalLauncher(settings)
-        else -> WslLauncher(settings)
+internal fun usesWsl(runtime: String, isWindows: Boolean): Boolean =
+    isWindows && runtime !in setOf("windows", "local")
+
+fun createLauncher(settings: DshSettingsState, ideWorkspacePath: String? = null): Launcher =
+    if (usesWsl(settings.runtime, SystemInfoRt.isWindows)) {
+        WslLauncher(settings, ideWorkspacePath)
+    } else {
+        LocalLauncher(settings)
     }
-}

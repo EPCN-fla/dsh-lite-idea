@@ -9,7 +9,7 @@ object ToolText {
         "description", "path", "filePath", "file_path", "absPath", "targetFile", "target_file",
         "query", "pattern", "url", "uri", "command", "cmd", "prompt",
     )
-    private val XML_ROW = Regex("<([a-zA-Z_][\\w-]*)>([\\s\\S]*?)</\\1>")
+    private const val MAX_XML_CHARS = 100_000
 
     private fun JsonObject.str(k: String): String? =
         get(k)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
@@ -44,17 +44,38 @@ object ToolText {
         return parts.joinToString("\n\n").ifEmpty { null }
     }
 
-    /** A result made only of `<k>v</k>` elements renders as key/value rows; else null. */
+    /**
+     * A result made only of `<k>v</k>` elements renders as key/value rows.
+     * This deliberately small parser consumes the input once from left to
+     * right; a backtracking regex can rescan the whole suffix for every '<k>'
+     * in malformed tool output on the EDT.
+     */
     fun xmlRows(detail: String): List<Pair<String, String>>? {
         val trimmed = detail.trim()
+        if (trimmed.isEmpty() || trimmed.length > MAX_XML_CHARS) return null
         val rows = ArrayList<Pair<String, String>>()
         var pos = 0
-        for (m in XML_ROW.findAll(trimmed)) {
-            if (trimmed.substring(pos, m.range.first).isNotBlank()) return null
-            rows.add(m.groupValues[1] to m.groupValues[2].trim())
-            pos = m.range.last + 1
+        while (pos < trimmed.length) {
+            while (pos < trimmed.length && trimmed[pos].isWhitespace()) pos++
+            if (pos == trimmed.length) break
+            if (trimmed[pos] != '<') return null
+            val keyStart = pos + 1
+            if (keyStart >= trimmed.length ||
+                !(trimmed[keyStart].isLetter() || trimmed[keyStart] == '_')
+            ) return null
+            var cursor = keyStart + 1
+            while (cursor < trimmed.length &&
+                (trimmed[cursor].isLetterOrDigit() || trimmed[cursor] == '_' || trimmed[cursor] == '-')
+            ) cursor++
+            if (cursor >= trimmed.length || trimmed[cursor] != '>') return null
+            val key = trimmed.substring(keyStart, cursor)
+            val valueStart = cursor + 1
+            val closing = "</$key>"
+            val valueEnd = trimmed.indexOf(closing, startIndex = valueStart)
+            if (valueEnd < 0) return null
+            rows.add(key to trimmed.substring(valueStart, valueEnd).trim())
+            pos = valueEnd + closing.length
         }
-        if (rows.isEmpty() || trimmed.substring(pos).isNotBlank()) return null
-        return rows
+        return rows.ifEmpty { null }
     }
 }

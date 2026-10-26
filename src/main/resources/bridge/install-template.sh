@@ -1,5 +1,4 @@
 set -e
-export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PROF="$DSH_HOME/profiles/acp-vscode"
 if [ ! -d "$PROF" ]; then
@@ -96,10 +95,9 @@ __PATCH_CURRENT__YML
   fi
   rm -f "$PATCH_TMP"
 fi
-if ! grep -q dsh-vscode-bridge "$PROF/package.json" 2>/dev/null; then
-  echo "[install] installing bridge package __PKG__…"
-  __COMMAND__ plugin --profile acp-vscode add "__PKG__"
-else
-  echo "[install] bridge package already installed"
-fi
+# `dsh plugin add` forwards to pnpm: reapplying the confirmed spec is a no-op
+# when it is current and upgrades an existing 0.3.x install when it is not.
+PKG_SPEC="$1"
+printf '%s\n' "[install] installing/updating bridge package ${PKG_SPEC}…"
+__COMMAND__ plugin --profile acp-vscode add "${PKG_SPEC}"
 echo "[install] DONE"

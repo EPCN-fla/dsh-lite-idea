@@ -28,8 +28,8 @@ class DshSettingsState : PersistentStateComponent<DshSettingsState.Data> {
         data = state
         // 0.1.0 defaulted to the bridge-less "acp" profile; bridge features
         // (presets/permissions/titles/commands/skills/export) need acp-vscode.
-        if (!data.migratedProfile && data.profile == "acp") {
-            data.profile = "acp-vscode"
+        if (!data.migratedProfile) {
+            if (data.profile == "acp") data.profile = "acp-vscode"
             data.migratedProfile = true
         }
     }
@@ -42,7 +42,12 @@ class DshSettingsState : PersistentStateComponent<DshSettingsState.Data> {
         set(v) { data.command = v }
     var profile: String
         get() = data.profile
-        set(v) { data.profile = v }
+        set(v) {
+            data.profile = v
+            // An explicit choice (including the bridge-less "acp" profile)
+            // must not be rewritten by the legacy-default migration on restart.
+            data.migratedProfile = true
+        }
     var wslDistro: String
         get() = data.wslDistro
         set(v) { data.wslDistro = v }

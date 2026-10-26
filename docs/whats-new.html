@@ -1,3 +1,20 @@
+<h2>0.1.1 — Reliability and Web configuration import</h2>
+<ul>
+  <li>Preview and explicitly import models and agent presets from the Web configuration with
+    bridge 0.4.0 or newer, including conflict policy, revision checks and actionable results.</li>
+  <li>Move ACP and bridge protocol writes off the UI thread, bound control RPCs, and clean up
+    agent process trees and pending requests during timeout, reconnect and project close.</li>
+  <li>Make session switching reliable under rapid interaction: preserve the latest selection and
+    draft, serialize bridge subscriptions, reject stale list results and reset stale controls.</li>
+  <li>Restore live tool updates and interrupted states from history, and bound archive, shell,
+    decompression and diagnostic output sizes.</li>
+  <li>Honor WSL UNC distributions and configured target environments across launch, discovery,
+    Doctor and bridge installation; pass package specs without shell interpolation.</li>
+  <li>Encode file-mention resource links correctly, disable Swing HTML for untrusted tool text,
+    restrict Markdown link protocols and preserve fenced-code formatting.</li>
+  <li>Improve thought-card refresh, tool-result parsing, localized tool labels and plaintext
+    credential-storage guidance.</li>
+</ul>
 <h2>0.1.0 — Initial public release</h2>
 <ul>
   <li>Chat with DeepSeek Harness over ACP from the DSH tool window, with streaming Markdown,

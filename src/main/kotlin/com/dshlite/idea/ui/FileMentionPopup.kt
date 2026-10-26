@@ -20,7 +20,7 @@ class FileMentionPopup(
     data class FilePick(val name: String, val absPath: String)
 
     private val picker = PickerPopup<FilePick>(composerProvider, { pick -> onPick(pick) })
-    private var querySeq = 0
+    @Volatile private var querySeq = 0
 
     val isVisible: Boolean get() = picker.isVisible
 
@@ -41,6 +41,7 @@ class FileMentionPopup(
                     val q = query.lowercase()
                     com.intellij.openapi.roots.ProjectFileIndex.getInstance(project)
                         .iterateContent { vf ->
+                            if (project.isDisposed || seq != querySeq) return@iterateContent false
                             com.intellij.openapi.progress.ProgressManager.checkCanceled()
                             if (!vf.isDirectory && vf.name.lowercase().contains(q)) {
                                 out.add(FilePick(vf.name, File(vf.path).absolutePath))
