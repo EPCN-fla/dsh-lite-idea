@@ -1189,13 +1189,20 @@ class ChatPanel(
                 is com.dshlite.idea.chat.HistoryMessage.Thought ->
                     put(Entry(ThoughtCard().apply { setText(m.text) }))
                 is com.dshlite.idea.chat.HistoryMessage.Tool -> {
-                    val card = ToolCard(
-                        ToolCard.ToolState(
-                            title = m.title, subtitle = m.subtitle, status = m.status,
-                            input = m.input, detail = m.detail,
+                    // A live update may have arrived while the log was loading.
+                    // Keep that newer card; otherwise register the restored one
+                    // so later updates and repeated tool_call frames find it.
+                    if (!toolEntries.containsKey(m.id)) {
+                        val card = ToolCard(
+                            ToolCard.ToolState(
+                                title = m.title, subtitle = m.subtitle, status = m.status,
+                                input = m.input, detail = m.detail,
+                            )
                         )
-                    )
-                    put(ToolEntry(card))
+                        val entry = ToolEntry(card)
+                        toolEntries[m.id] = entry
+                        put(entry)
+                    }
                 }
             }
         }

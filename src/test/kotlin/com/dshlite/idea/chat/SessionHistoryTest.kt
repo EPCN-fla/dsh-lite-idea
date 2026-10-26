@@ -34,6 +34,13 @@ class SessionHistoryTest {
         assertEquals("bad json", new.input!!.asString)
     }
 
+    @Test fun `marks tool calls without a durable result as interrupted`() {
+        val items = SessionHistory.parse(
+            """{"type":"tool/call","data":{"callId":"interrupted","name":"bash","arguments":"{}"}}"""
+        )
+        assertEquals("failed", (items.single() as HistoryMessage.Tool).status)
+    }
+
     @Test fun `imports only root log from archive and preserves the archive`() {
         val file = Files.createTempFile("dsh-history-", ".zip").toFile()
         try {

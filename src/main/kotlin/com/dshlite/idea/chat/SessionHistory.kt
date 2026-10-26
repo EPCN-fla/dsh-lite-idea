@@ -135,7 +135,12 @@ object SessionHistory {
                 }
             }
         }
-        // A call without a recorded result was interrupted (crash/cancel).
+        // A static log cannot still be running: a call without a recorded
+        // result was interrupted by a crash/cancel. A later live update can
+        // still replace this state through the registered history card.
+        out.filterIsInstance<HistoryMessage.Tool>().forEach { tool ->
+            if (tool.status == "in_progress") tool.status = "failed"
+        }
         return out
     }
 
