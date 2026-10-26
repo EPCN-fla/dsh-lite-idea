@@ -139,10 +139,15 @@ internal class ConfigSyncFlow(
             fail(IllegalStateException("bridge changed"))
             return
         }
-        client.request("config.preview", options.params(), PREVIEW_TIMEOUT_MS)
-            .whenComplete { result, error ->
-                onEdt { handlePreview(client, options, result, error) }
-            }
+        val request = try {
+            client.request("config.preview", options.params(), PREVIEW_TIMEOUT_MS)
+        } catch (e: Exception) {
+            fail(e)
+            return
+        }
+        request.whenComplete { result, error ->
+            onEdt { handlePreview(client, options, result, error) }
+        }
     }
 
     private fun handlePreview(
@@ -168,10 +173,15 @@ internal class ConfigSyncFlow(
         if (!ui.confirm(detail)) { finish(); return }
         // Never apply a reviewed revision to a replacement bridge instance.
         if (!stillConnected(client)) { fail(IllegalStateException("bridge changed")); return }
-        client.request("config.import", options.params(preview.revision), IMPORT_TIMEOUT_MS)
-            .whenComplete { imported, importError ->
-                onEdt { handleImport(imported, importError) }
-            }
+        val request = try {
+            client.request("config.import", options.params(preview.revision), IMPORT_TIMEOUT_MS)
+        } catch (e: Exception) {
+            fail(e)
+            return
+        }
+        request.whenComplete { imported, importError ->
+            onEdt { handleImport(imported, importError) }
+        }
     }
 
     private fun handleImport(result: JsonObject?, error: Throwable?) {

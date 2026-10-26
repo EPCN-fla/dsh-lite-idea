@@ -15,10 +15,12 @@ class ConfigSyncFlowTest {
         var preview: JsonObject = summary()
         var imported: JsonObject = summary().apply { addProperty("backupPath", "/host/profile/backup.yml") }
         var importFailure: Throwable? = null
+        var synchronousFailureMethod: String? = null
         var deferredPreview: CompletableFuture<JsonObject?>? = null
         var onPreview: (() -> Unit)? = null
 
         override fun request(method: String, params: JsonObject?, timeoutMs: Long?): CompletableFuture<JsonObject?> {
+            if (method == synchronousFailureMethod) throw IllegalStateException("SECRET")
             calls += Call(method, params ?: JsonObject(), timeoutMs)
             onPreview?.takeIf { method == "config.preview" }?.invoke()
             if (method == "config.preview") {
@@ -204,6 +206,20 @@ class ConfigSyncFlowTest {
             assertFalse(text.contains("SECRET"))
         }
         assertFalse(configSyncErrorText(IllegalStateException("SECRET")).contains("SECRET"))
+    }
+
+    @Test fun `synchronous rpc failures release the flow for a later attempt`() {
+        for (method in listOf("config.preview", "config.import")) {
+            val f = Fixture()
+            f.rpc.synchronousFailureMethod = method
+            f.flow.run()
+            assertEquals(method, DshBundle.message("configSync.error.unknown"), f.ui.errors.single())
+            assertFalse(f.ui.errors.single().contains("SECRET"))
+
+            f.rpc.synchronousFailureMethod = null
+            f.flow.run() // no queued scope: cancels normally instead of alreadyOpen
+            assertTrue(f.ui.infos.none { it.first == DshBundle.message("configSync.alreadyOpen") })
+        }
     }
 
     private companion object {

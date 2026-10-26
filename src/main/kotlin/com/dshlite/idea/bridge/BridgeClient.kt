@@ -77,7 +77,7 @@ class BridgeClient private constructor(
             client.onClose = onClose
             client.startReader()
             try {
-                val hs = client.request("bridge.handshake", JsonObject()).get(timeoutMs, TimeUnit.MILLISECONDS)
+                val hs = client.request("bridge.handshake", JsonObject(), timeoutMs).get(timeoutMs, TimeUnit.MILLISECONDS)
                 val caps = hs?.get("capabilities") as? JsonObject
                 client.handshake = BridgeHandshake(
                     plugin = hs?.str("plugin"),

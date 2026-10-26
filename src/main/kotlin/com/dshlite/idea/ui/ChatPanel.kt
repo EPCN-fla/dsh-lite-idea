@@ -417,15 +417,15 @@ class ChatPanel(
         val caps = bridge.capabilities
         ApplicationManager.getApplication().executeOnPooledThread {
             if (bridgeSubscribedSession != id) {
-                runCatching { c.request("session.unsubscribe").get(5, java.util.concurrent.TimeUnit.SECONDS) }
+                runCatching { c.request("session.unsubscribe", timeoutMs = 5_000).get(5, java.util.concurrent.TimeUnit.SECONDS) }
                 runCatching {
-                    c.request("session.subscribe", JsonObject().apply { addProperty("sessionId", id) })
+                    c.request("session.subscribe", JsonObject().apply { addProperty("sessionId", id) }, 5_000)
                         .get(5, java.util.concurrent.TimeUnit.SECONDS)
                 }.onSuccess { bridgeSubscribedSession = id }
             }
             if (caps?.workspaceGrouping == true) {
                 runCatching {
-                    c.request("workspace.attach", JsonObject().apply { addProperty("sessionId", id) })
+                    c.request("workspace.attach", JsonObject().apply { addProperty("sessionId", id) }, 5_000)
                         .get(5, java.util.concurrent.TimeUnit.SECONDS)
                 }
             }
@@ -441,7 +441,7 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val res = runCatching {
-                c.request("command.list", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("command.list", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.getOrNull() ?: return@executeOnPooledThread
             val parsed = res.getAsJsonArray("commands")?.mapNotNull { el ->
@@ -472,7 +472,7 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val res = runCatching {
-                c.request("skill.list", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("skill.list", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.getOrNull() ?: return@executeOnPooledThread
             val parsed = res.getAsJsonArray("skills")?.mapNotNull { el ->
@@ -624,7 +624,7 @@ class ChatPanel(
                 val res = c.request("command.run", JsonObject().apply {
                     addProperty("sessionId", id)
                     addProperty("line", line)
-                }).get(120, java.util.concurrent.TimeUnit.SECONDS)
+                }, 120_000).get(120, java.util.concurrent.TimeUnit.SECONDS)
                 val kind = res?.get("kind")?.takeIf { it.isJsonPrimitive }?.asString ?: "success"
                 val text = res?.get("text")?.takeIf { it.isJsonPrimitive }?.asString
                 onEdt {
@@ -685,7 +685,7 @@ class ChatPanel(
         addSystemMessage(DshBundle.message("export.running"))
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
-                val res = c.request("session.exportZip", JsonObject().apply { addProperty("sessionId", id) })
+                val res = c.request("session.exportZip", JsonObject().apply { addProperty("sessionId", id) }, 120_000)
                     .get(120, java.util.concurrent.TimeUnit.SECONDS)
                 val path = res?.get("path")?.takeIf { it.isJsonPrimitive }?.asString
                 if (path == null) {
@@ -743,10 +743,10 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val list = runCatching {
-                c.request("preset.list").get(10, java.util.concurrent.TimeUnit.SECONDS)
+                c.request("preset.list", timeoutMs = 10_000).get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.getOrNull()
             val curResult = runCatching {
-                c.request("preset.current", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("preset.current", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }
             // The bridge learns a fresh session asynchronously; "not live" right
@@ -813,7 +813,7 @@ class ChatPanel(
         val id = sessionId ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val resResult = runCatching {
-                c.request("permission.get", JsonObject().apply { addProperty("sessionId", id) })
+                c.request("permission.get", JsonObject().apply { addProperty("sessionId", id) }, 10_000)
                     .get(10, java.util.concurrent.TimeUnit.SECONDS)
             }
             val resErr = resResult.exceptionOrNull()
@@ -848,7 +848,7 @@ class ChatPanel(
                 c.request("preset.select", JsonObject().apply {
                     addProperty("sessionId", id)
                     addProperty("presetId", presetId)
-                }).get(10, java.util.concurrent.TimeUnit.SECONDS)
+                }, 10_000).get(10, java.util.concurrent.TimeUnit.SECONDS)
             }.onFailure { e ->
                 // Mount-time failures are not flagged by the roster — learn them
                 // (bridge forwards agent-preset/invalid as data.code since 0.1.3;
@@ -877,7 +877,7 @@ class ChatPanel(
                 val res = c.request("permission.set", JsonObject().apply {
                     addProperty("sessionId", id)
                     addProperty("name", name)
-                }).get(10, java.util.concurrent.TimeUnit.SECONDS)
+                }, 10_000).get(10, java.util.concurrent.TimeUnit.SECONDS)
                 val current = res?.get("current")?.takeIf { !it.isJsonNull }?.asString
                 onEdt {
                     if (sessionId != id || bridge.client !== c) return@onEdt
@@ -921,7 +921,7 @@ class ChatPanel(
             c.request("session.setTitle", JsonObject().apply {
                 addProperty("sessionId", id)
                 addProperty("title", title)
-            }).orTimeout(15, java.util.concurrent.TimeUnit.SECONDS).whenComplete { _, err ->
+            }, 15_000).whenComplete { _, err ->
                 val cause = (err as? java.util.concurrent.ExecutionException)?.cause ?: err
                 if (cause == null) {
                     onEdt {
@@ -960,7 +960,7 @@ class ChatPanel(
             f.completeExceptionally(com.dshlite.idea.bridge.BridgeException("bridge is not connected", -32000, null))
             return f
         }
-        c.request("session.delete", JsonObject().apply { addProperty("sessionId", id) }).whenComplete { _, err ->
+        c.request("session.delete", JsonObject().apply { addProperty("sessionId", id) }, 15_000).whenComplete { _, err ->
             val cause = (err as? java.util.concurrent.ExecutionException)?.cause ?: err
             if (cause is com.dshlite.idea.bridge.BridgeException && cause.dataCode == "session/active") {
                 f.completeExceptionally(com.dshlite.idea.bridge.BridgeException(

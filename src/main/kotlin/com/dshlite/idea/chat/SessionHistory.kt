@@ -144,7 +144,7 @@ object SessionHistory {
      * archive is missing, oversized, or has no root log.
      */
     fun importViaBridge(client: BridgeClient, launcher: Launcher, sessionId: String): List<HistoryMessage>? {
-        val res = client.request("session.exportZip", JsonObject().apply { addProperty("sessionId", sessionId) })
+        val res = client.request("session.exportZip", JsonObject().apply { addProperty("sessionId", sessionId) }, 60_000)
             .get(60, TimeUnit.SECONDS) ?: return null
         val path = res.str("path") ?: return null
         val bytes = res.get("bytes")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L
