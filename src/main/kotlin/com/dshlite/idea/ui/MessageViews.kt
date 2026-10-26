@@ -24,6 +24,16 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingConstants
 
+/** Must be installed BEFORE assigning untrusted text: JLabel constructors and
+ * setText() otherwise create Swing's HTML renderer for "<html>..." payloads. */
+internal fun <T : JLabel> T.disableSwingHtml(): T = apply {
+    putClientProperty("html.disable", true)
+}
+
+/** JToolTip has its own renderer; the label's html.disable flag does not cover it. */
+private fun plainTooltip(text: String): String =
+    if (text.startsWith("<html>", ignoreCase = true)) " $text" else text
+
 /**
  * Read-only wrapped (selectable) text, sized height-for-width by the
  * transcript layout. Plain JTextArea: JBTextArea's extras cost ~3x per row.
@@ -225,7 +235,7 @@ class ErrorMessageRow(message: String) : MessageList.Row() {
 abstract class CollapsibleCard : MessageList.Row() {
     private val chevron = JLabel(AllIcons.General.ArrowRight)
     protected val leading = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(4), 0)).apply { isOpaque = false }
-    protected val titleLabel = JLabel()
+    protected val titleLabel = JLabel().disableSwingHtml()
     protected val trailing = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(6), 0)).apply { isOpaque = false }
     val body = VStack(JBUI.scale(4)).apply {
         border = JBUI.Borders.empty(2, 22, 6, 10)
@@ -320,7 +330,13 @@ class StatusDot : JLabel() {
 
 /** Two-column key/value table: muted keys, wrapped values. */
 class KeyValueTable(rows: List<Pair<String, String>>) : JPanel(), HeightForWidth {
-    private val keys = rows.map { (k, _) -> JLabel(k).apply { foreground = ChatColors.muted; font = ChatFonts.mono() } }
+    private val keys = rows.map { (k, _) ->
+        JLabel().disableSwingHtml().apply {
+            text = k
+            foreground = ChatColors.muted
+            font = ChatFonts.mono()
+        }
+    }
     private val values = rows.map { (_, v) -> WrapText(v.take(MAX_CELL), ChatFonts.forText(v, ChatFonts.mono())) }
     private val colGap = JBUI.scale(10)
     private val rowGap = JBUI.scale(2)
@@ -393,9 +409,9 @@ class ToolCard(var state: ToolState) : CollapsibleCard() {
     )
 
     private val dot = StatusDot()
-    private val nameLabel = JLabel()
-    private val kindLabel = JLabel().apply { foreground = ChatColors.muted; font = smaller() }
-    private val statusLabel = JLabel().apply { foreground = ChatColors.muted; font = smaller() }
+    private val nameLabel = JLabel().disableSwingHtml()
+    private val kindLabel = JLabel().disableSwingHtml().apply { foreground = ChatColors.muted; font = smaller() }
+    private val statusLabel = JLabel().disableSwingHtml().apply { foreground = ChatColors.muted; font = smaller() }
 
     private fun smaller(): Font = ChatFonts.small(delta = 2f)
 
@@ -425,7 +441,7 @@ class ToolCard(var state: ToolState) : CollapsibleCard() {
         val sub = state.subtitle ?: ""
         titleLabel.text = sub
         titleLabel.font = ChatFonts.forText(sub, ChatFonts.small())
-        titleLabel.toolTipText = if (sub.isEmpty()) null else sub
+        titleLabel.toolTipText = if (sub.isEmpty()) null else plainTooltip(sub)
         kindLabel.text = state.kind?.takeIf { it != "other" } ?: ""
         kindLabel.isVisible = kindLabel.text.isNotEmpty()
         statusLabel.text = state.status ?: ""

@@ -47,7 +47,8 @@ class WelcomePanel(
             font = UIUtil.getLabelFont().deriveFont(Font.BOLD, UIUtil.getLabelFont().size + 6f)
             alignmentX = CENTER_ALIGNMENT
         }
-        val workspace = JBLabel(project.name).apply {
+        val workspace = JBLabel().disableSwingHtml().apply {
+            text = project.name
             foreground = JBColor.GRAY
             border = JBUI.Borders.empty(10, 0, 0, 0)
             alignmentX = CENTER_ALIGNMENT
