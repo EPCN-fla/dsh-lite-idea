@@ -70,7 +70,7 @@ can upgrade an older bridge.
 | `dsh command` | `npx -y @deepseek-ai/dsh` | Launch command on the target side; the plugin appends `--profile <profile>` |
 | `dsh profile` | `acp-vscode` | dsh profile to boot; the default is created by the bridge installer. `acp` runs bridge-less |
 | `WSL distro` | `""` | WSL distribution name when runtime is `wsl` (empty = default) |
-| `Extra environment` | `""` | `KEY=VALUE` per line, passed to the dsh process (e.g. `DEEPSEEK_API_KEY=…`) |
+| `Extra environment` | `""` | `KEY=VALUE` per line, passed to the dsh process. Stored as plain text in `dsh-lite.xml`; do not put API keys or other secrets here |
 
 ## Topologies
 
@@ -126,7 +126,8 @@ remains available for on-demand diagnostics.
 - **First `npx` run times out** → it downloads the package; install once (`npm i -g @deepseek-ai/dsh`)
   or point `dsh command` at a checkout (e.g. `node ~/deepseek-harness/apps/cli/lib/bin.js`).
 - **"no API key for provider route"** → configure the key once in the dsh Web UI Models page
-  (shared via `$DSH_HOME`), or set `DEEPSEEK_API_KEY` under Extra environment.
+  (shared via `$DSH_HOME`). Extra environment is plain-text IDE state and is not
+  a credential store; keep API keys in the dsh provider configuration instead.
 - **Bridge features missing** (titles/delete/presets/permissions/slash commands) → run the bridge
   installer; see the [version table](#version-matching).
 - **"profile "acp-vscode" does not exist"** → the default profile is created by the bridge
