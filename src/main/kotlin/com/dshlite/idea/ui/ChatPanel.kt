@@ -1424,7 +1424,7 @@ class ChatPanel(
             is SlashLine.Skill -> {
                 // Skills are invoked through the model: ask it to use the skill.
                 composer.text = ""
-                sendPrompt("请使用 ${slash.name} 技能${if (slash.rest.isNotEmpty()) "：${slash.rest}" else ""}")
+                sendPrompt("请使用 ${slash.name} 技能${if (slash.rest.isNotEmpty()) "：${slash.rest}" else ""}", draftText = text)
                 return
             }
             null -> {}
@@ -1433,19 +1433,32 @@ class ChatPanel(
         sendPrompt(text)
     }
 
-    private fun sendPrompt(text: String) {
-        setBusy(true)
+    private fun sendPrompt(text: String, draftText: String = text) {
         var turnSessionId: String? = null
+        var userMessageAdded = false
         val files = pendingFiles.toMap()
         pendingFiles.clear()
 
         val sid = sessionId
+        val creationRequest = if (sid == null) Any().also { sessionRequest = it } else null
+        setBusy(true)
         val promptFuture = if (sid != null) {
             java.util.concurrent.CompletableFuture.completedFuture(sid)
         } else {
             service.newSession().thenCompose { result ->
                 val ready = java.util.concurrent.CompletableFuture<String>()
                 onEdt {
+                    if (sessionRequest !== creationRequest) {
+                        // A newer explicit new/resume owns the UI now. Do not clear
+                        // its transcript or steal its target; discard only the
+                        // superseded empty session created for this send.
+                        service.closeSession(result.sessionId)
+                        ready.completeExceptionally(
+                            java.util.concurrent.CancellationException("session creation was superseded")
+                        )
+                        return@onEdt
+                    }
+                    sessionRequest = null
                     switchSession(result.sessionId)
                     markSessionUsed(result.sessionId)
                     markSessionClean()
@@ -1466,6 +1479,8 @@ class ChatPanel(
                 onEdt {
                     turnSessionId = id
                     busySessionId = id
+                    userMessageAdded = true
+                    markSessionDirty(id)
                     addUserMessage(text)
                     f.complete(id)
                 }
@@ -1489,8 +1504,15 @@ class ChatPanel(
             }
             .whenComplete { _, error ->
                 onEdt {
+                    if (sessionRequest === creationRequest) sessionRequest = null
                     setBusy(false)
-                    if (sessionId == turnSessionId || turnSessionId == null) {
+                    val cancelled = isCancellation(error)
+                    if (error != null && !userMessageAdded && composer.text.isBlank()) {
+                        composer.text = draftText
+                        composer.caretPosition = composer.text.length
+                        files.forEach { (name, path) -> pendingFiles.putIfAbsent(name, path) }
+                    }
+                    if (!cancelled && (sessionId == turnSessionId || turnSessionId == null)) {
                         endStreaming()
                         if (error != null) addError(DshBundle.message("chat.promptFailed", rootMessage(error)))
                     }
@@ -1516,7 +1538,7 @@ class ChatPanel(
     private fun applyUpdate(u: SessionUpdateData) {
         // Only real conversation content makes a session "dirty" for the
         // blank-session reuse rule — config/usage updates don't count.
-        if (u.kind in setOf("agent_message_chunk", "agent_thought_chunk", "tool_call")) {
+        if (u.kind in setOf("agent_message_chunk", "agent_thought_chunk", "user_message_chunk", "tool_call")) {
             sessionId?.let { markSessionDirty(it) }
         }
         when (u.kind) {
@@ -1946,13 +1968,18 @@ class ChatPanel(
         }
     }
 
-    private fun rootMessage(t: Throwable): String {
+    private fun rootCause(t: Throwable): Throwable {
         var cause = t
         while (cause is java.util.concurrent.CompletionException || cause is java.util.concurrent.ExecutionException) {
             cause = cause.cause ?: break
         }
-        return cause.message ?: cause.toString()
+        return cause
     }
+
+    private fun isCancellation(t: Throwable?): Boolean =
+        t != null && rootCause(t) is java.util.concurrent.CancellationException
+
+    private fun rootMessage(t: Throwable): String = rootCause(t).let { it.message ?: it.toString() }
 
     override fun dispose() {
         disposed = true
