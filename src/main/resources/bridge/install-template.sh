@@ -97,6 +97,7 @@ __PATCH_CURRENT__YML
 fi
 # `dsh plugin add` forwards to pnpm: reapplying the confirmed spec is a no-op
 # when it is current and upgrades an existing 0.3.x install when it is not.
-echo "[install] installing/updating bridge package __PKG__…"
-__COMMAND__ plugin --profile acp-vscode add "__PKG__"
+PKG_SPEC="$1"
+printf '%s\n' "[install] installing/updating bridge package ${PKG_SPEC}…"
+__COMMAND__ plugin --profile acp-vscode add "${PKG_SPEC}"
 echo "[install] DONE"

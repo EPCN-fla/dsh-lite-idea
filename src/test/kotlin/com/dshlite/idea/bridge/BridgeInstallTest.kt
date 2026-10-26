@@ -13,10 +13,11 @@ class BridgeInstallTest {
         assertEquals(BridgeInstall.BRIDGE_SPEC_LEGACY, BridgeInstall.bridgeSpecForHost("0.1.6-alpha.2"))
     }
 
-    @Test fun `repair reapplies requested package spec to upgrade existing bridge`() {
-        val script = BridgeInstall.buildInstallScript("dsh", "dsh-vscode-bridge@^0.4.0")
-        assertTrue(script.contains("installing/updating bridge package dsh-vscode-bridge@^0.4.0"))
-        assertTrue(script.contains("dsh plugin --profile acp-vscode add \"dsh-vscode-bridge@^0.4.0\""))
+    @Test fun `repair accepts a literal package argument without shell interpolation`() {
+        val script = BridgeInstall.buildInstallScript("dsh")
+        assertTrue(script.contains("PKG_SPEC=\"\$1\""))
+        assertTrue(script.contains("dsh plugin --profile acp-vscode add \"\${PKG_SPEC}\""))
+        assertFalse(script.contains("__PKG__"))
         assertFalse(script.contains("bridge package already installed"))
     }
 }
