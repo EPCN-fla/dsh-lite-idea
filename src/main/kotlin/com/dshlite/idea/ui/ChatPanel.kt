@@ -702,7 +702,7 @@ class ChatPanel(
                     .get(120, java.util.concurrent.TimeUnit.SECONDS)
                 val path = res?.get("path")?.takeIf { it.isJsonPrimitive }?.asString
                 if (path == null) {
-                    onEdt { addError(DshBundle.message("export.failed", "no path in response")) }
+                    onEdt { if (sessionId == id) addError(DshBundle.message("export.failed", "no path in response")) }
                     return@executeOnPooledThread
                 }
                 val bytes = res.get("bytes")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0
@@ -712,11 +712,12 @@ class ChatPanel(
                 ).fromDshPath(path)
                 val size = if (bytes > 1024 * 1024) "%.1f MB".format(bytes / 1024.0 / 1024.0)
                 else "${maxOf(1, bytes / 1024)} KB"
-                onEdt { showExportResult(hostPath, size) }
+                onEdt { if (sessionId == id) showExportResult(hostPath, size) }
             } catch (e: Exception) {
                 val isTooOld = (e as? java.util.concurrent.ExecutionException)?.cause
                     ?.let { it is com.dshlite.idea.bridge.BridgeException && it.rpcCode == -32601 } == true
                 onEdt {
+                    if (sessionId != id) return@onEdt
                     addError(
                         if (isTooOld) DshBundle.message("cmd.bridgeTooOld")
                         else DshBundle.message("export.failed", rootMessage(e))
