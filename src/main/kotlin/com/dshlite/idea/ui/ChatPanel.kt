@@ -1074,8 +1074,14 @@ class ChatPanel(
         attachSession(newId)
         currentTitle = title
         configOptions = emptyList()
+        presets = emptyList()
+        permModes = emptyList()
+        nativeCommands = emptyList()
+        skills = emptyList()
         currentPreset = null
         currentPermMode = null
+        rebuildConfigBar()
+        updateSlashPopup()
         usageLabel.text = " "
         clearEntries()
         updateTitle()
@@ -1370,8 +1376,9 @@ class ChatPanel(
                     loadTranscript(id)
                 }
                 if (options != null) {
+                    // Resumed sessions keep their own model/effort. Remembered
+                    // selections are only defaults for freshly created sessions.
                     applyConfigOptions(options)
-                    applyRememberedSelection()
                 } else {
                     refreshPresets()
                     refreshPermissions()
@@ -1842,7 +1849,7 @@ class ChatPanel(
         try {
             configBar.removeAll()
             railSelects = emptyMap()
-            configBar.isVisible = true
+            configBar.isVisible = false
             permissionButton.isVisible = permModes.isNotEmpty()
 
             // Rail order: preset → model → reasoning effort (…then any extras).
@@ -1856,6 +1863,7 @@ class ChatPanel(
                 configBar.add(buildOptionSelect(opt))
             }
 
+            configBar.isVisible = configBar.componentCount > 0
             configBar.revalidate()
             configBar.repaint()
         } finally {
