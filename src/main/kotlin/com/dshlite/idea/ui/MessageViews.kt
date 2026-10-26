@@ -387,7 +387,7 @@ fun sectionLabel(text: String): JLabel = JLabel(text.uppercase()).apply {
 
 /** Monospace pre block on a faint code background (wrapped, bounded). */
 fun preBlock(text: String): JComponent {
-    val shown = if (text.length > MAX_PRE) text.take(MAX_PRE) + "\n… (truncated)" else text
+    val shown = if (text.length > MAX_PRE) text.take(MAX_PRE) + "\n" + DshBundle.message("tool.truncated") else text
     return RoundedBox(fill = { ChatColors.codeBackground }, outline = { null }, arc = JBUI.scale(6)).apply {
         border = JBUI.Borders.empty(4, 8)
         add(WrapText(shown, ChatFonts.forText(shown, ChatFonts.mono())).apply { wrapStyleWord = false })
@@ -444,7 +444,14 @@ class ToolCard(var state: ToolState) : CollapsibleCard() {
         titleLabel.toolTipText = if (sub.isEmpty()) null else plainTooltip(sub)
         kindLabel.text = state.kind?.takeIf { it != "other" } ?: ""
         kindLabel.isVisible = kindLabel.text.isNotEmpty()
-        statusLabel.text = state.status ?: ""
+        statusLabel.text = when (state.status) {
+            "pending" -> DshBundle.message("tool.status.pending")
+            "in_progress" -> DshBundle.message("tool.status.in_progress")
+            "completed" -> DshBundle.message("tool.status.completed")
+            "failed" -> DshBundle.message("tool.status.failed")
+            "cancelled" -> DshBundle.message("tool.status.cancelled")
+            else -> state.status ?: ""
+        }
     }
 
     /** Populate the body: input (k/v rows or verbatim), result, output. */
@@ -454,7 +461,7 @@ class ToolCard(var state: ToolState) : CollapsibleCard() {
             if (e.isJsonPrimitive && e.asJsonPrimitive.isString) e.asString else gson.toJson(e)
         val input = state.input
         if (input != null && !input.isJsonNull) {
-            body.add(sectionLabel("input"))
+            body.add(sectionLabel(DshBundle.message("tool.input")))
             if (input.isJsonObject && input.asJsonObject.size() > 0) {
                 body.add(KeyValueTable(input.asJsonObject.entrySet().map { (k, v) -> k to asText(v) }))
             } else {
@@ -462,15 +469,15 @@ class ToolCard(var state: ToolState) : CollapsibleCard() {
             }
         }
         state.detail?.takeIf { it.isNotBlank() }?.let { detail ->
-            body.add(sectionLabel("result"))
+            body.add(sectionLabel(DshBundle.message("tool.result")))
             val kv = com.dshlite.idea.chat.ToolText.xmlRows(detail)
             body.add(if (kv != null) KeyValueTable(kv) else preBlock(detail))
         }
         state.output?.takeIf { !it.isJsonNull }?.let {
-            body.add(sectionLabel("output"))
+            body.add(sectionLabel(DshBundle.message("tool.output")))
             body.add(preBlock(asText(it)))
         }
-        if (body.componentCount == 0) body.add(sectionLabel("no details"))
+        if (body.componentCount == 0) body.add(sectionLabel(DshBundle.message("tool.noDetails")))
     }
 }
 

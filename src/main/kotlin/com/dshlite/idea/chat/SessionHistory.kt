@@ -1,5 +1,6 @@
 package com.dshlite.idea.chat
 
+import com.dshlite.idea.DshBundle
 import com.dshlite.idea.bridge.BridgeClient
 import com.dshlite.idea.launcher.Launcher
 import com.dshlite.idea.launcher.ShellEnv
@@ -77,10 +78,10 @@ object SessionHistory {
                         val b = el as? JsonObject ?: return@forEach
                         when (b.str("type")) {
                             "text" -> b.str("text")?.let(parts::add)
-                            "image" -> parts.add("🖼 " + (b.obj("attachment")?.str("name") ?: "image"))
+                            "image" -> parts.add("🖼 " + (b.obj("attachment")?.str("name") ?: DshBundle.message("history.image")))
                             "file" -> {
                                 val a = b.obj("attachment")
-                                parts.add("📄 " + (a?.str("name") ?: a?.str("fileName") ?: "file"))
+                                parts.add("📄 " + (a?.str("name") ?: a?.str("fileName") ?: DshBundle.message("history.file")))
                             }
                         }
                     }
@@ -130,7 +131,7 @@ object SessionHistory {
                     tool.status = if (error?.isBoolean == true && error.asBoolean) "failed" else "completed"
                     val detail = textOf(result.arr("content"))
                     if (detail.isNotEmpty()) {
-                        tool.detail = if (detail.length > MAX_RESULT_CHARS) detail.take(MAX_RESULT_CHARS) + "\n… (truncated)" else detail
+                        tool.detail = if (detail.length > MAX_RESULT_CHARS) detail.take(MAX_RESULT_CHARS) + "\n" + DshBundle.message("tool.truncated") else detail
                     }
                 }
             }
