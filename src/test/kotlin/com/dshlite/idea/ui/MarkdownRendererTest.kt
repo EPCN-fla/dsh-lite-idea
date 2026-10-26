@@ -21,6 +21,18 @@ class MarkdownRendererTest {
         assertFalse(html.contains("href=\"javascript:"))
     }
 
+    @Test fun `allows only explicit safe link protocols`() {
+        val html = MarkdownRenderer.toHtml(
+            "[data](data:text/html,hello) [upper](DATA:text/html,hello) " +
+                "[entity](data&colon;text/html,hello) [script](javascript:alert(1))\n\n" +
+                "[web](https://example.com) [mail](mailto:user@example.com)"
+        )
+        assertFalse(html.contains("href=\"data:", ignoreCase = true))
+        assertFalse(html.contains("href=\"javascript:", ignoreCase = true))
+        assertTrue(html.contains("href=\"https://example.com\""))
+        assertTrue(html.contains("href=\"mailto:user@example.com\""))
+    }
+
     @Test fun `code blocks preserve indentation and escape markup`() {
         val html = MarkdownRenderer.toHtml("```html\n  <script>alert(1)</script>\n\n    next\n``` ")
         assertTrue(html.contains("class=\"code\""))
@@ -29,4 +41,10 @@ class MarkdownRendererTest {
         assertTrue(html.contains("&nbsp;&nbsp;&lt;script&gt;"))
         assertTrue(html.contains("<br>&nbsp;<br>"))
     }
+    @Test fun `code blocks preserve trailing blank lines and tab stops`() {
+        assertEquals("a &nbsp;&nbsp;b<br>ab &nbsp;c", MarkdownRenderer.codeLinesHtml("a\tb\nab\tc"))
+        val html = MarkdownRenderer.toHtml("```\nvalue\n\n\n```")
+        assertTrue(html.contains("value<br>&nbsp;<br>&nbsp;"))
+    }
+
 }
