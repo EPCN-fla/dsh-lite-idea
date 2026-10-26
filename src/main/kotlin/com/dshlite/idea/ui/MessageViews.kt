@@ -299,7 +299,9 @@ class ThoughtCard : CollapsibleCard() {
 
     fun setText(t: String) {
         text = t
-        if (expanded) view.setMarkdown(t)
+        // Rebuild an open body now; mark a collapsed body stale so reopening
+        // cannot show the text from its first expansion.
+        refreshIfOpen()
     }
 
 }
