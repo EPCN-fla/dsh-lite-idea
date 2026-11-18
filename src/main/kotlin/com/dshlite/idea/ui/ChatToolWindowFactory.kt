@@ -45,6 +45,10 @@ class ChatToolWindowFactory : ToolWindowFactory {
                     override fun actionPerformed(e: AnActionEvent) = panel.openSessionsAction()
                     override fun getActionUpdateThread() = ActionUpdateThread.EDT
                 },
+                object : DumbAwareAction(DshBundle.message("chat.subagents")) {
+                    override fun actionPerformed(e: AnActionEvent) = panel.openSubagentsAction()
+                    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                },
             )
         )
         // Everything else folds into the header's gear (…) menu.

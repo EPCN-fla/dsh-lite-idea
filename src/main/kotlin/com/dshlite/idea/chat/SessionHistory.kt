@@ -149,17 +149,32 @@ object SessionHistory {
      * Blocking: export through the bridge and parse. Returns null when the
      * archive is missing, oversized, or has no root log.
      */
+    internal fun exportRequestParams(sessionId: String) = JsonObject().apply {
+        addProperty("sessionId", sessionId)
+        addProperty("includeDescendants", false)
+        addProperty("temporary", true)
+    }
+
     fun importViaBridge(client: BridgeClient, launcher: Launcher, sessionId: String): List<HistoryMessage>? {
-        val res = client.request("session.exportZip", JsonObject().apply { addProperty("sessionId", sessionId) }, 60_000)
+        val res = client.request("session.exportZip", exportRequestParams(sessionId), 60_000)
             .get(60, TimeUnit.SECONDS) ?: return null
         val path = res.str("path") ?: return null
         val bytes = res.get("bytes")?.takeIf { it.isJsonPrimitive }?.asLong ?: 0L
-        if (bytes > MAX_ARCHIVE_BYTES) return null
+        val temporary = res.get("temporary")
+            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }?.asBoolean == true
         val hostPath = runCatching { launcher.fromDshPath(path) }.getOrDefault(path)
-        // The bridge uses the same default path as an explicit user export.
-        // This file is not owned by the importer: deleting it also deletes a
-        // ZIP the user may have exported for later use.
-        return parseArchive(File(hostPath))
+        return parseExportArchive(File(hostPath), bytes, temporary)
+    }
+
+    internal fun parseExportArchive(file: File, bytes: Long, temporary: Boolean): List<HistoryMessage>? {
+        try {
+            if (bytes > MAX_ARCHIVE_BYTES) return null
+            return parseArchive(file)
+        } finally {
+            // Only bridge-owned temporary exports are removed. Older bridges
+            // export to the user's normal path and do not mark it temporary.
+            if (temporary) runCatching { file.delete() }
+        }
     }
 
     /** Parse the root `session[.vN].jsonl` of an export archive (null if absent). */

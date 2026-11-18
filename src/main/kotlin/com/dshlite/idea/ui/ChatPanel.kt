@@ -7,6 +7,7 @@ import com.dshlite.idea.acp.ConnectionState
 import com.dshlite.idea.acp.ContentBlock
 import com.dshlite.idea.acp.PROVIDER_DEFAULT_EFFORT_VALUE
 import com.dshlite.idea.acp.SessionUpdateData
+import com.dshlite.idea.acp.SessionInfoData
 import com.dshlite.idea.acp.chooseEffort
 import com.dshlite.idea.acp.collectEffortDefaults
 import com.dshlite.idea.acp.findEffortOption
@@ -91,6 +92,13 @@ class ChatPanel(
     private val centerCards = JPanel(java.awt.CardLayout())
     private var showingWelcome = true
     private var welcomeSessionsGeneration = 0L
+    private var sessionCatalogGeneration = 0L
+    private var knownSubagents: List<SessionInfoData> = emptyList()
+    private val transcriptCache = com.dshlite.idea.chat.SessionTranscriptCache()
+    private val recentSessionIds = ArrayList<String>()
+    private var subagentRequestSeq = 0L
+    private var activeSubagentRequest: com.dshlite.idea.chat.SubagentRequestIdentity? = null
+    private var subagentTranscriptDialog: SubagentTranscriptDialog? = null
 
     private val entries = ArrayList<Entry>()
     private val toolEntries = HashMap<String, ToolEntry>()
@@ -211,9 +219,11 @@ class ChatPanel(
                 updateTitle()
                 updateStatus(service.state, null)
                 if (state == BridgeState.ON) {
-                    loadWelcomeSessions()
+                    fetchSessionGroups()
                     sessionId?.let { bridgeAttach(it) }
                 } else {
+                    knownSubagents = emptyList()
+                    updateTitle()
                     presets = emptyList(); permModes = emptyList()
                     nativeCommands = emptyList(); skills = emptyList()
                     bridgeSubscribedSession = null // force resubscribe after a bridge reconnect
@@ -254,7 +264,7 @@ class ChatPanel(
         override fun onState(state: ConnectionState, detail: String?) {
             onEdt {
                 updateStatus(state, detail)
-                if (state == ConnectionState.READY) loadWelcomeSessions()
+                if (state == ConnectionState.READY) fetchSessionGroups()
             }
         }
     }
@@ -401,6 +411,7 @@ class ChatPanel(
 
     fun createNewSessionAction() = createNewSession()
     fun openSessionsAction() = openSessions()
+    fun openSubagentsAction() = openSubagents()
     fun showSkillsDialogAction() = showSkillsDialog()
     fun exportSessionAction() = exportSession()
     fun importWebConfigAction() = configSyncFlow.run()
@@ -1014,6 +1025,7 @@ class ChatPanel(
                         updateTitle()
                     }
                 }
+                transcriptCache.remove(id)
                 markArchived(id)
                 f.complete(null)
             }
@@ -1059,6 +1071,10 @@ class ChatPanel(
     private fun attachSession(newId: String) {
         updateListener?.let(service::removeUpdateListener)
         sessionId = newId
+        activeSubagentRequest = null
+        subagentRequestSeq++
+        subagentTranscriptDialog?.takeIf { it.isShowing }?.close(0)
+        subagentTranscriptDialog = null
         val epoch = ++sessionEpoch
         val listener = object : AcpService.UpdateListener {
             override fun onUpdate(update: SessionUpdateData) {
@@ -1089,6 +1105,13 @@ class ChatPanel(
         clearEntries()
         updateTitle()
         bridgeAttach(newId)
+        recentSessionIds.remove(newId)
+        recentSessionIds.add(newId)
+        while (recentSessionIds.size > 2) {
+            val evicted = recentSessionIds.removeAt(0)
+            if (evicted != newId && evicted != busySessionId) runCatching { service.closeSession(evicted) }
+        }
+        fetchSessionGroups()
         log.info("[dsh] session selected: " + newId.take(8))
     }
 
@@ -1107,7 +1130,9 @@ class ChatPanel(
             return
         }
         val name = currentTitle?.takeIf { it.isNotBlank() } ?: DshBundle.message("sessions.untitled")
-        titleLabel.text = "$dot $name (${id.take(8)})"
+        val children = com.dshlite.idea.chat.directSubagents(knownSubagents, id).size
+        val suffix = if (children > 0) " · " + DshBundle.message("subagents.count", children) else ""
+        titleLabel.text = "$dot $name (${id.take(8)})$suffix"
     }
 
     /** Landing iff the transcript is empty and no turn is running. */
@@ -1128,32 +1153,45 @@ class ChatPanel(
      */
     private fun loadTranscript(id: String) {
         val epoch = sessionEpoch
+        transcriptCache.get(id)?.let { cached ->
+            removeHistoryPlaceholder()
+            if (cached.isNotEmpty()) renderHistory(cached) else syncCards()
+            return
+        }
         val client = bridge.client?.takeIf { bridge.isOn && bridge.capabilities?.sessionExport == true }
         val launcher = com.dshlite.idea.launcher.createLauncher(com.dshlite.idea.settings.DshSettingsState.getInstance(), project.basePath)
         ApplicationManager.getApplication().executeOnPooledThread {
             var failure: Throwable? = null
-            var source = "bridge"
-            var messages: List<com.dshlite.idea.chat.HistoryMessage>? = null
-            if (client != null) {
-                try {
-                    messages = com.dshlite.idea.chat.SessionHistory.importViaBridge(client, launcher, id)
-                } catch (e: Throwable) {
-                    failure = e
-                }
-            }
-            if (messages == null) {
-                source = "shell"
-                val script = com.dshlite.idea.chat.SessionHistory.shellScript(id)
-                if (script != null) {
-                    try {
-                        val out = service.runTargetShell(script, 30_000).get(35, java.util.concurrent.TimeUnit.SECONDS)
-                        val parsed = com.dshlite.idea.chat.SessionHistory.parse(out)
-                        messages = parsed
-                        failure = null
-                    } catch (e: Throwable) {
-                        if (failure == null) failure = e
+            var source = "cache"
+            val messages = try {
+                transcriptCache.importShared(id) {
+                    var imported: List<com.dshlite.idea.chat.HistoryMessage>? = null
+                    if (client != null) {
+                        try {
+                            imported = com.dshlite.idea.chat.SessionHistory.importViaBridge(client, launcher, id)
+                            source = "bridge"
+                        } catch (e: Throwable) {
+                            failure = e
+                        }
                     }
+                    if (imported == null) {
+                        source = "shell"
+                        val script = com.dshlite.idea.chat.SessionHistory.shellScript(id)
+                        if (script != null) {
+                            try {
+                                val out = service.runTargetShell(script, 30_000).get(35, java.util.concurrent.TimeUnit.SECONDS)
+                                imported = com.dshlite.idea.chat.SessionHistory.parse(out)
+                                failure = null
+                            } catch (e: Throwable) {
+                                if (failure == null) failure = e
+                            }
+                        }
+                    }
+                    imported
                 }
+            } catch (e: Throwable) {
+                failure = e
+                null
             }
             if (messages != null) {
                 log.info("[dsh] history loaded: session=" + id.take(8) + " messages=" + messages.size + " source=" + source)
@@ -1165,9 +1203,7 @@ class ChatPanel(
                 removeHistoryPlaceholder()
                 val list = messages
                 if (list.isNullOrEmpty()) {
-                    // Only a user-initiated resume explains itself; the landing
-                    // page stays for an empty session.
-                    if (failure != null) addSystemMessage(DshBundle.message("chat.historyFailed", rootMessage(failure!!)))
+                    if (list == null && failure != null) addSystemMessage(DshBundle.message("chat.historyFailed", rootMessage(failure!!)))
                     syncCards()
                     return@onEdt
                 }
@@ -1310,20 +1346,74 @@ class ChatPanel(
             .setValue("dsh.archivedSessionIds", set.joinToString(","))
     }
 
-    /** Bridge titles + stored rows when connected; otherwise ACP (all pages). */
-    private fun fetchSessions(): java.util.concurrent.CompletableFuture<List<com.dshlite.idea.acp.SessionInfoData>> {
-        val archived = archivedLocal()
-        val c = bridge.client?.takeIf { bridge.isOn }
-        if (c == null) return service.listSessions().thenApply { result ->
-            result.first.filter { it.sessionId !in archived }
+    /** Last successful bridge archive snapshot survives transient refresh errors. */
+    @Volatile private var archivedBridge: Set<String> = emptySet()
+
+    private fun archivedForRefresh(client: com.dshlite.idea.bridge.BridgeClient?): java.util.concurrent.CompletableFuture<Set<String>> {
+        val archived = archivedLocal().toMutableSet()
+        if (client == null || bridge.capabilities?.workspaceGrouping != true) {
+            archived += archivedBridge
+            return java.util.concurrent.CompletableFuture.completedFuture(archived)
         }
-        return com.dshlite.idea.chat.SessionCatalog(
-            request = c::request,
-            workspace = service.workspaceDshCwd(),
-            ignoreCase = com.intellij.openapi.util.SystemInfoRt.isWindows &&
-                com.dshlite.idea.settings.DshSettingsState.getInstance().runtime in setOf("windows", "local"),
-        ).fetch(archived)
+        return client.request("workspace.list", JsonObject(), 5_000).handle { response, _ ->
+            val remote = response?.getAsJsonArray("archivedSessionIds")?.mapNotNull {
+                it.takeIf { el -> el.isJsonPrimitive && el.asJsonPrimitive.isString }?.asString
+            }
+            if (remote != null) archivedBridge = remote.toSet()
+            archived += archivedBridge
+            archived
+        }
     }
+
+    /**
+     * ACP is the sole source for ordinary history. The bridge enriches that
+     * exact root set and supplies origin-tagged subagent metadata only.
+     */
+    private fun fetchSessionGroups(): java.util.concurrent.CompletableFuture<com.dshlite.idea.chat.SessionGroups> {
+        val generation = ++sessionCatalogGeneration
+        val client = bridge.client?.takeIf { bridge.isOn }
+        val parent = sessionId
+        val archivedFuture = archivedForRefresh(client)
+        val rootsFuture = service.listSessions()
+        val result = rootsFuture.thenCombine(archivedFuture) { listed, archived ->
+            val rows = LinkedHashMap<String, SessionInfoData>()
+            val live = buildList {
+                recentSessionIds.reversed().forEach { add(it) }
+                if (parent != null && parent !in this) add(parent)
+            }
+            live.forEach { id ->
+                if (id !in archived) rows[id] = SessionInfoData(id, service.workspaceDshCwd(), null, null, live = true)
+            }
+            listed.first.forEach { row ->
+                if (row.sessionId.isNotBlank() && row.sessionId !in archived) rows.putIfAbsent(row.sessionId, row)
+            }
+            rows.values.toList() to archived
+        }.thenCompose { (roots, archived) ->
+            if (client == null || bridge.capabilities?.sessionOrigin != true) {
+                knownSubagents = emptyList()
+                java.util.concurrent.CompletableFuture.completedFuture(com.dshlite.idea.chat.SessionGroups(roots, emptyList()))
+            } else {
+                com.dshlite.idea.chat.SessionCatalog(
+                    request = { method, params -> client.request(method, params, 15_000) },
+                    workspace = service.workspaceDshCwd(),
+                    ignoreCase = com.intellij.openapi.util.SystemInfoRt.isWindows &&
+                        com.dshlite.idea.settings.DshSettingsState.getInstance().runtime in setOf("windows", "local"),
+                ).enrich(roots, archived, parent)
+            }
+        }
+        result.whenComplete { groups, error ->
+            if (error == null && groups != null) onEdt {
+                if (generation == sessionCatalogGeneration) {
+                    knownSubagents = groups.subagents
+                    updateTitle()
+                }
+            }
+        }
+        return result
+    }
+
+    private fun fetchSessions(): java.util.concurrent.CompletableFuture<List<SessionInfoData>> =
+        fetchSessionGroups().thenApply { it.sessions.filter { row -> row.sessionId !in archivedLocal() } }
 
     private fun openSessions() {
         fetchSessions().whenComplete { list, error ->
@@ -1361,6 +1451,74 @@ class ChatPanel(
                     val selected = dialog.selected ?: return@onEdt
                     resume(selected.sessionId, title = selected.title)
                 }
+            }
+        }
+    }
+
+    /** Refresh and pick only direct children of the current main session. */
+    private fun openSubagents() {
+        val parent = sessionId ?: return
+        if (bridge.capabilities?.sessionOrigin != true) {
+            Messages.showInfoMessage(project, DshBundle.message("subagents.unsupported"), DshBundle.message("subagents.title"))
+            return
+        }
+        fetchSessionGroups().whenComplete { groups, error ->
+            onEdt {
+                if (sessionId != parent) return@onEdt
+                if (error != null) {
+                    Messages.showErrorDialog(project, rootMessage(error), DshBundle.message("subagents.title"))
+                    return@onEdt
+                }
+                val rows = com.dshlite.idea.chat.directSubagents(groups.subagents, parent)
+                if (rows.isEmpty()) {
+                    Messages.showInfoMessage(project, DshBundle.message("subagents.none"), DshBundle.message("subagents.title"))
+                    return@onEdt
+                }
+                val dialog = SubagentsDialog(project, rows)
+                if (dialog.showAndGet()) {
+                    dialog.selected?.let { openSubagent(parent, it, rows) }
+                }
+            }
+        }
+    }
+
+    /** Read a catalog-validated child log without ACP resume/close or main-UI mutation. */
+    private fun openSubagent(parent: String, child: SessionInfoData, catalogRows: List<SessionInfoData>) {
+        val client = bridge.client
+        if (sessionId != parent || child.sessionId !in com.dshlite.idea.chat.directSubagents(catalogRows, parent).map { it.sessionId }) return
+        if (client == null || !bridge.isOn || bridge.capabilities?.sessionOrigin != true ||
+            bridge.capabilities?.sessionExport != true
+        ) {
+            Messages.showWarningDialog(project, DshBundle.message("subagents.unsupported"), DshBundle.message("subagents.title"))
+            return
+        }
+        val identity = com.dshlite.idea.chat.SubagentRequestIdentity(parent, child.sessionId, ++subagentRequestSeq)
+        activeSubagentRequest = identity
+        val dialog = SubagentTranscriptDialog(project, child)
+        subagentTranscriptDialog = dialog
+        dialog.show()
+        val launcher = com.dshlite.idea.launcher.createLauncher(
+            com.dshlite.idea.settings.DshSettingsState.getInstance(), project.basePath,
+        )
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = runCatching {
+                transcriptCache.importShared(child.sessionId) {
+                    com.dshlite.idea.chat.SessionHistory.importViaBridge(client, launcher, child.sessionId)
+                }
+            }
+            onEdt {
+                val valid = sessionId == parent &&
+                    com.dshlite.idea.chat.matchesSubagentRequest(activeSubagentRequest, identity) &&
+                    child.sessionId in com.dshlite.idea.chat.directSubagents(knownSubagents, parent).map { it.sessionId } &&
+                    subagentTranscriptDialog === dialog && dialog.isShowing
+                if (!valid) return@onEdt
+                result.fold(
+                    onSuccess = { messages ->
+                        if (messages == null) dialog.showError(DshBundle.message("subagents.unreadable"))
+                        else dialog.setMessages(messages)
+                    },
+                    onFailure = { dialog.showError(rootMessage(it)) },
+                )
             }
         }
     }
@@ -1531,7 +1689,7 @@ class ChatPanel(
             .whenComplete { _, error ->
                 onEdt {
                     if (sessionRequest === creationRequest) sessionRequest = null
-                    setBusy(false)
+                    if (sessionId == turnSessionId || turnSessionId == null) setBusy(false)
                     val cancelled = isCancellation(error)
                     if (error != null && !userMessageAdded && composer.text.isBlank()) {
                         composer.text = draftText
@@ -2012,6 +2170,8 @@ class ChatPanel(
         disposed = true
         sessionRequest = null
         sessionEpoch++
+        activeSubagentRequest = null
+        subagentTranscriptDialog?.takeIf { it.isShowing }?.close(0)
         slashPopup.hide()
         filePopup.hide()
         renderTimer.stop()

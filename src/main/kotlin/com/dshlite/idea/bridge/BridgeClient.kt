@@ -35,6 +35,8 @@ data class BridgeCapabilities(
     val sessionExport: Boolean = false,
     /** bridge 0.4.0+: explicit Web model/preset import. Absent on older bridges. */
     val configSync: Boolean = false,
+    /** session.list/get rows carry origin and parentSession for safe subagent separation. */
+    val sessionOrigin: Boolean = false,
 )
 
 data class BridgeHandshake(
@@ -94,6 +96,7 @@ class BridgeClient private constructor(
                         skills = caps.bool("skills"),
                         sessionExport = caps.bool("sessionExport"),
                         configSync = caps.bool("configSync"),
+                        sessionOrigin = caps.bool("sessionOrigin"),
                     ),
                 )
             } catch (e: Exception) {

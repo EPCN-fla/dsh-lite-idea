@@ -95,4 +95,21 @@ class SessionHistoryTest {
         assertNull(ToolText.xmlRows("prefix<exit>0</exit>"))
         assertNull(ToolText.xmlRows("<exit>0</exit>suffix"))
     }
+    @Test fun `root-only temporary exports are cleaned but ordinary exports are preserved`() {
+        val params = SessionHistory.exportRequestParams("child")
+        assertFalse(params.get("includeDescendants").asBoolean)
+        assertTrue(params.get("temporary").asBoolean)
+        for ((temporary, survives) in listOf(true to false, false to true)) {
+            val file = Files.createTempFile("dsh-history-export-", ".zip").toFile()
+            ZipOutputStream(file.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("session.jsonl"))
+                zip.write("""{"type":"user/message","data":{"source":{"kind":"user"},"content":[{"type":"text","text":"root"}]}}""".toByteArray())
+                zip.closeEntry()
+            }
+            assertEquals(listOf(HistoryMessage.User("root")), SessionHistory.parseExportArchive(file, file.length(), temporary))
+            assertEquals(survives, file.isFile)
+            file.delete()
+        }
+    }
+
 }
