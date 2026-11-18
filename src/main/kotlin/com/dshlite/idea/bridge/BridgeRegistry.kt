@@ -106,7 +106,6 @@ object BridgeRegistry {
     fun parseBridgeRegistryResponse(text: String): List<BridgeRegistryEntry> {
         val value = try {
             JsonReader(StringReader(text)).use { reader ->
-                reader.isLenient = false
                 val parsed = readJsonElement(reader)
                 check(reader.peek() == JsonToken.END_DOCUMENT)
                 parsed
