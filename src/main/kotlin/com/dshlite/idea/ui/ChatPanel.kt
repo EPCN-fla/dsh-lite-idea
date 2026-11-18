@@ -1565,11 +1565,28 @@ class ChatPanel(
     }
 
     private fun runDoctor() {
-        service.doctor().whenComplete { out, error ->
+        val settings = com.dshlite.idea.settings.DshSettingsState.getInstance()
+        val installation = if (bridge.isOn) {
+            java.util.concurrent.CompletableFuture.completedFuture<com.dshlite.idea.bridge.BridgeInstallationState?>(null)
+        } else {
+            BridgeInstall.runScript(
+                com.dshlite.idea.bridge.buildBridgeInstallationProbeScript(
+                    settings.profile,
+                    settings.envMap()["DSH_HOME"],
+                ),
+                15_000,
+                ideWorkspacePath = project.basePath,
+            ).handle { result, _ ->
+                result?.let { com.dshlite.idea.bridge.parseBridgeInstallationProbe(it.first) }
+                    ?: com.dshlite.idea.bridge.BridgeInstallationState.UNKNOWN
+            }
+        }
+        service.doctor().thenCombine(installation) { out, state -> out to state }.whenComplete { result, error ->
             onEdt {
                 if (error != null) {
                     Messages.showErrorDialog(project, rootMessage(error), DshBundle.message("chat.doctor"))
                 } else {
+                    val (out, installationState) = result
                     val bridgeLine = if (bridge.isOn) {
                         DshBundle.message(
                             "doctor.bridge.on",
@@ -1578,7 +1595,14 @@ class ChatPanel(
                         )
                     } else {
                         DshBundle.message("doctor.bridge.off") + "\n" +
-                            DshBundle.message("doctor.bridge.discovery", bridge.lastDiscoveryInfo)
+                            DshBundle.message("doctor.bridge.discovery", bridge.lastDiscoveryInfo) + "\n" +
+                            DshBundle.message(
+                                when (installationState) {
+                                    com.dshlite.idea.bridge.BridgeInstallationState.INSTALLED -> "doctor.bridge.installed"
+                                    com.dshlite.idea.bridge.BridgeInstallationState.MISSING -> "doctor.bridge.missing"
+                                    else -> "doctor.bridge.installationUnknown"
+                                },
+                            )
                     }
                     Messages.showInfoMessage(project, "$out\n$bridgeLine", DshBundle.message("chat.doctor"))
                 }
