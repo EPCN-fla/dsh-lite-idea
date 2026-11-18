@@ -13,6 +13,7 @@ class SessionCatalog(
     private val request: (String, JsonObject?) -> CompletableFuture<JsonObject?>,
     private val workspace: String,
     private val ignoreCase: Boolean = false,
+    private val knownTitles: Map<String, String> = emptyMap(),
 ) {
     /** Legacy bridge-only listing, retained for older callers and tests. */
     fun fetch(archived: Set<String>): CompletableFuture<List<SessionInfoData>> =
@@ -32,7 +33,9 @@ class SessionCatalog(
         onMetadata: (SessionGroups) -> Unit = {},
     ): CompletableFuture<SessionGroups> = list(archived).thenCompose { rows ->
         val titles = rows.filter { !it.title.isNullOrBlank() }.associate { it.sessionId to it.title }
-        val titledRoots = roots.map { row -> row.copy(title = titles[row.sessionId] ?: row.title) }
+        val titledRoots = roots.map { row ->
+            row.copy(title = titles[row.sessionId] ?: row.title ?: knownTitles[row.sessionId])
+        }
         val groups = SessionGroups(titledRoots, partitionSessions(rows).subagents)
         // Publish cheap list metadata before any session.get deadline can stall
         // the UI. The returned future completes after background title hydration.
@@ -48,7 +51,9 @@ class SessionCatalog(
                     response?.get(key)?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { el ->
                         val obj = el as? JsonObject ?: return@forEach
                         val parsed = SessionInfoData.parse(obj)
-                        val row = parsed.copy(title = parsed.title?.trim()?.takeIf { it.isNotEmpty() })
+                        val row = parsed.copy(
+                            title = parsed.title?.trim()?.takeIf { it.isNotEmpty() } ?: knownTitles[parsed.sessionId],
+                        )
                         if (row.sessionId.isBlank() || row.sessionId in archived || !matches(row.cwd)) return@forEach
                         // Live rows take precedence over header-only stored rows.
                         rows.putIfAbsent(row.sessionId, row)

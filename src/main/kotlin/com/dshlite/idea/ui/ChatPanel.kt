@@ -100,6 +100,7 @@ class ChatPanel(
      *  Keep this before init: the initial welcome refresh reads it synchronously. */
     @Volatile private var archivedBridge: Set<String> = emptySet()
     private val transcriptCache = com.dshlite.idea.chat.SessionTranscriptCache()
+    private val sessionCatalogCache = com.dshlite.idea.chat.SessionCatalogCache()
     private val recentSessionIds = ArrayList<String>()
     private var subagentRequestSeq = 0L
     private var activeSubagentRequest: com.dshlite.idea.chat.SubagentRequestIdentity? = null
@@ -257,6 +258,7 @@ class ChatPanel(
                         onEdt {
                             if (sid != sessionId) return@onEdt
                             currentTitle = t
+                            if (t != null && sid != null) sessionCatalogCache.putTitle(sid, t)
                             updateTitle()
                         }
                     }
@@ -968,6 +970,7 @@ class ChatPanel(
                 val cause = (err as? java.util.concurrent.ExecutionException)?.cause ?: err
                 if (cause == null) {
                     onEdt {
+                        sessionCatalogCache.putTitle(id, title)
                         if (id == sessionId) {
                             currentTitle = title
                             updateTitle()
@@ -1044,6 +1047,7 @@ class ChatPanel(
                     }
                 }
                 changesTracker.clear(id)
+                sessionCatalogCache.remove(id)
                 transcriptCache.remove(id)
                 markArchived(id)
                 f.complete(null)
@@ -1426,7 +1430,24 @@ class ChatPanel(
         val client = bridge.client?.takeIf { bridge.isOn }
         val hasOrigin = client != null && bridge.capabilities?.sessionOrigin == true
         val parent = sessionId
-        val archivedFuture = archivedForRefresh(client)
+        val workspace = service.workspaceDshCwd()
+        val cachedMetadata = if (hasOrigin) sessionCatalogCache.freshMetadata(client!!, workspace) else null
+
+        // Optimistic project-local snapshot: open the dialog/welcome list before
+        // any ACP or bridge round trip. Fresh ACP membership replaces it later.
+        sessionCatalogCache.snapshot()?.let { cached ->
+            publishSessionGroups(generation, cached, applySubagents = hasOrigin, onSnapshot)
+        }
+
+        fun cachedArchived(): MutableSet<String> = archivedLocal().apply { addAll(archivedBridge) }
+        // Fresh bridge metadata also covers the archived snapshot, so repeat
+        // opens within the TTL perform no bridge RPCs at all.
+        val archivedFuture = if (cachedMetadata != null) {
+            java.util.concurrent.CompletableFuture.completedFuture<Set<String>>(cachedArchived())
+        } else {
+            archivedForRefresh(client)
+        }
+
         fun roots(listed: List<SessionInfoData>, archived: Set<String>): List<SessionInfoData> {
             val rows = LinkedHashMap<String, SessionInfoData>()
             val live = buildList {
@@ -1434,18 +1455,16 @@ class ChatPanel(
                 if (parent != null && parent !in this) add(parent)
             }
             live.forEach { id ->
-                if (id !in archived) rows[id] = SessionInfoData(id, service.workspaceDshCwd(), null, null, live = true)
+                if (id !in archived) rows[id] = SessionInfoData(id, workspace, null, null, live = true)
             }
             listed.forEach { row ->
                 if (row.sessionId.isNotBlank() && row.sessionId !in archived) rows.putIfAbsent(row.sessionId, row)
             }
-            return rows.values.toList()
+            return sessionCatalogCache.updateRoots(rows.values.toList()).sessions
         }
         val acpRoots = service.listSessions().thenApply { listed ->
-            val cachedArchived = archivedLocal().apply { addAll(archivedBridge) }
-            roots(listed.first, cachedArchived)
+            roots(listed.first, cachedArchived())
         }
-        // Do not let the bounded workspace.list RPC delay the first usable rows.
         acpRoots.thenAccept { rows ->
             publishSessionGroups(
                 generation,
@@ -1461,18 +1480,27 @@ class ChatPanel(
             publishSessionGroups(generation, acpGroups, applySubagents = !hasOrigin, onSnapshot)
             if (!hasOrigin) {
                 java.util.concurrent.CompletableFuture.completedFuture(acpGroups)
+            } else if (cachedMetadata != null) {
+                val merged = com.dshlite.idea.chat.mergeSessionMetadata(currentRoots, cachedMetadata)
+                val cached = sessionCatalogCache.putHydrated(merged)
+                publishSessionGroups(generation, cached, applySubagents = true, onSnapshot)
+                java.util.concurrent.CompletableFuture.completedFuture(cached)
             } else {
                 com.dshlite.idea.chat.SessionCatalog(
                     request = { method, params -> client!!.request(method, params, 15_000) },
-                    workspace = service.workspaceDshCwd(),
+                    workspace = workspace,
                     ignoreCase = com.intellij.openapi.util.SystemInfoRt.isWindows &&
                         com.dshlite.idea.settings.DshSettingsState.getInstance().runtime in setOf("windows", "local"),
+                    knownTitles = sessionCatalogCache.knownTitles(),
                 ).enrich(
                     currentRoots,
                     archived,
                     parent,
-                    onMetadata = { publishSessionGroups(generation, it, applySubagents = true, onSnapshot) },
-                )
+                    onMetadata = { groups ->
+                        val cached = sessionCatalogCache.putMetadata(client!!, workspace, groups)
+                        publishSessionGroups(generation, cached, applySubagents = true, onSnapshot)
+                    },
+                ).thenApply { sessionCatalogCache.putHydrated(it) }
             }
         }
         result.whenComplete { groups, error ->

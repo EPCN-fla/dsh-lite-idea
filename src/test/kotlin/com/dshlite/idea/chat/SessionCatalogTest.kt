@@ -131,4 +131,36 @@ class SessionCatalogTest {
         assertEquals("Child title", directSubagents(result.join().subagents, "root").single().title)
     }
 
+    @Test fun `cached titles skip every session get request during background refresh`() {
+        val listing = JsonParser.parseString("""{
+            "sessions":[{"sessionId":"root","cwd":"/workspace","title":"Fresh live title"}],
+            "stored":[
+              {"sessionId":"stored","cwd":"/workspace"},
+              {"sessionId":"child","cwd":"/workspace","origin":"subagent","parentSession":"root"}
+            ]
+        }""").asJsonObject
+        var titleRequests = 0
+        val result = SessionCatalog({ method, _ ->
+            if (method == "session.list") CompletableFuture.completedFuture(listing)
+            else {
+                titleRequests++
+                CompletableFuture.completedFuture(JsonObject().apply { addProperty("title", "Unexpected") })
+            }
+        }, "/workspace", knownTitles = mapOf("stored" to "Cached stored", "child" to "Cached child", "root" to "Stale"))
+            .enrich(
+                roots = listOf(
+                    SessionInfoData("root", "/workspace", null, null, live = true),
+                    SessionInfoData("stored", "/workspace", null, null),
+                ),
+                archived = emptySet(),
+                parentSessionId = "root",
+            )
+
+        val groups = result.join()
+        assertEquals("Fresh live title", groups.sessions[0].title)
+        assertEquals("Cached stored", groups.sessions[1].title)
+        assertEquals("Cached child", directSubagents(groups.subagents, "root").single().title)
+        assertEquals(0, titleRequests)
+    }
+
 }
