@@ -422,6 +422,7 @@ class ChatPanel(
             project,
             bridge,
             onInstalled = { service.reset() },
+            importProfile = { configSyncFlow.run(requireBridge = false) },
         )
     }
 

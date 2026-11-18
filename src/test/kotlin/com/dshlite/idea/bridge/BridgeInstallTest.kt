@@ -4,20 +4,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BridgeInstallTest {
-    @Test fun `current hosts select bridge 0_4 and legacy hosts stay on 0_2`() {
-        assertEquals("dsh-vscode-bridge@^0.4.0", BridgeInstall.BRIDGE_SPEC_CURRENT)
-        for (version in listOf("0.1.7-rc.2", "0.2.0-rc.2", "0.2.1-rc.2", null)) {
-            assertEquals(BridgeInstall.BRIDGE_SPEC_CURRENT, BridgeInstall.bridgeSpecForHost(version))
-        }
-        assertEquals(BridgeInstall.BRIDGE_SPEC_LEGACY, BridgeInstall.bridgeSpecForHost("0.1.5-rc.2"))
-        assertEquals(BridgeInstall.BRIDGE_SPEC_LEGACY, BridgeInstall.bridgeSpecForHost("0.1.6-alpha.2"))
-    }
-
     @Test fun `repair accepts a literal package argument without shell interpolation`() {
         val script = BridgeInstall.buildInstallScript("dsh")
         assertTrue(script.contains("PKG_SPEC=\"\$1\""))
         assertTrue(script.contains("dsh plugin --profile acp-vscode add \"\${PKG_SPEC}\""))
         assertFalse(script.contains("__PKG__"))
         assertFalse(script.contains("bridge package already installed"))
+    }
+
+    @Test fun `installer owns only stable rows and installs package before editing activation`() {
+        val script = BridgeInstall.buildInstallScript("dsh")
+        assertTrue(script.contains("name: '@deepseek-ai/dsh-workspace'"))
+        assertTrue(script.contains("name: 'dsh-vscode-bridge'"))
+        assertFalse(script.contains("dsh-agent-preset"))
+        assertFalse(script.contains("permission-preset"))
+        assertFalse(script.contains("__PATCH_"))
+        assertTrue(script.indexOf("plugin --profile acp-vscode add") < script.indexOf("PYML="))
+        assertTrue(script.contains("mktemp \"\$PROF/.cordis.patch.yml.bridge-install.XXXXXX\""))
+    }
+
+    @Test fun `registry query requests modern and legacy compatibility metadata`() {
+        val script = BridgeInstall.buildBridgeRegistryQueryScript()
+        assertTrue(script.contains("dshCompatibility"))
+        assertTrue(script.contains("devDependencies.@deepseek-ai/dsh-agent"))
+        assertTrue(script.contains("--fetch-timeout=15000"))
     }
 }

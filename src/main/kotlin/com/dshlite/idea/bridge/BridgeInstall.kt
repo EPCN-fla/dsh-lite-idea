@@ -30,30 +30,21 @@ object BridgeInstall {
 
     private val log = com.intellij.openapi.diagnostic.Logger.getInstance(BridgeInstall::class.java)
 
-    const val BRIDGE_SPEC_CURRENT = "dsh-vscode-bridge@^0.4.0"
-    const val BRIDGE_SPEC_LEGACY = "dsh-vscode-bridge@^0.2.0"
-
     private fun resource(name: String): String =
         BridgeInstall::class.java.getResourceAsStream("/bridge/$name")!!
             .readBytes().toString(StandardCharsets.UTF_8)
 
-    /** Bridge package spec to pre-fill for a host dsh version string. */
-    fun bridgeSpecForHost(version: String?): String {
-        val m = version?.let { Regex("""(\d+)\.(\d+)\.(\d+)""").find(it) } ?: return BRIDGE_SPEC_CURRENT
-        val major = m.groupValues[1].toInt(); val minor = m.groupValues[2].toInt(); val patch = m.groupValues[3].toInt()
-        return if (major == 0 && (minor == 0 || (minor == 1 && patch <= 6))) BRIDGE_SPEC_LEGACY else BRIDGE_SPEC_CURRENT
-    }
-
     fun buildVersionProbeScript(command: String): String =
         "$command --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n1"
 
-    /** Assemble the full install script for the target side. */
+    fun buildBridgeRegistryQueryScript(): String =
+        "npm view 'dsh-vscode-bridge@>=0.1.1' version dshCompatibility " +
+            "devDependencies.@deepseek-ai/dsh-agent --json --fetch-retries=1 " +
+            "--fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=3000 --fetch-timeout=15000"
+
+    /** Assemble the minimal install script for the target side. */
     fun buildInstallScript(command: String): String =
-        resource("install-template.sh")
-            .replace("__PATCH_CURRENT__", resource("cordis-patch-current.yml"))
-            .replace("__PATCH_PRESETS__", resource("cordis-preset-rows.yml"))
-            .replace("__PATCH_LEGACY__", resource("cordis-patch-legacy.yml"))
-            .replace("__COMMAND__", command)
+        resource("install-template.sh").replace("__COMMAND__", command)
 
     private fun targetShellArgs(arguments: List<String>, ideWorkspacePath: String?): List<String> {
         val s = DshSettingsState.getInstance()
@@ -72,7 +63,7 @@ object BridgeInstall {
     }
 
     /** Run a shell script over stdin on the target side (not argv: the preset rows exceed the Windows argv limit). */
-    private fun runScript(
+    internal fun runScript(
         script: String,
         timeoutMs: Long,
         arguments: List<String> = emptyList(),
@@ -120,8 +111,16 @@ object BridgeInstall {
         return future
     }
 
-    /** Interactive flow: probe host version → confirm package spec → install → point dsh.profile at acp-vscode. */
-    fun run(project: Project, bridge: BridgeManager, onInstalled: () -> Unit = {}) {
+    /**
+     * Detect host → query compatible exact package → install without a version
+     * confirmation. Every selection failure happens before profile mutation.
+     */
+    fun run(
+        project: Project,
+        bridge: BridgeManager,
+        onInstalled: () -> Unit = {},
+        importProfile: () -> Unit = {},
+    ) {
         val rt = DshSettingsState.getInstance().runtime
         if (SystemInfoRt.isWindows && (rt == "windows" || rt == "local")) {
             Messages.showWarningDialog(
@@ -132,58 +131,87 @@ object BridgeInstall {
             return
         }
         val s = DshSettingsState.getInstance()
-        // Called from a toolbar action (EDT): the probe runs a target-side
-        // process and must not block the UI — move it off-EDT first.
         ApplicationManager.getApplication().executeOnPooledThread {
             val probed = bridge.hostDshVersion ?: runCatching {
-                runScript(buildVersionProbeScript(s.command), 30_000, ideWorkspacePath = project.basePath).get(35, TimeUnit.SECONDS).first.trim()
+                runScript(buildVersionProbeScript(s.command), 30_000, ideWorkspacePath = project.basePath)
+                    .get(35, TimeUnit.SECONDS).first.trim()
             }.getOrNull()?.takeIf { it.isNotBlank() }
-            val suggested = bridgeSpecForHost(probed)
-            promptAndInstall(project, bridge, s, probed, suggested, onInstalled)
+            val host = BridgeRegistry.parseDshVersion(probed)
+            if (host == null) {
+                ApplicationManager.getApplication().invokeLater {
+                    Messages.showErrorDialog(
+                        project,
+                        DshBundle.message("bridge.install.hostUnknown"),
+                        DshBundle.message("bridge.install.title"),
+                    )
+                }
+                return@executeOnPooledThread
+            }
+            val pkg = try {
+                val response = runScript(buildBridgeRegistryQueryScript(), 45_000, ideWorkspacePath = project.basePath)
+                    .get(50, TimeUnit.SECONDS).first
+                BridgeRegistry.selectLatestCompatibleBridge(host, BridgeRegistry.parseBridgeRegistryResponse(response))
+            } catch (e: Exception) {
+                val cause = generateSequence<Throwable>(e) { (it as? java.util.concurrent.ExecutionException)?.cause }
+                    .filterIsInstance<BridgeRegistryError>().firstOrNull()
+                log.warn("[install] online bridge lookup failed: ${cause?.code ?: "registry/unavailable"}")
+                ApplicationManager.getApplication().invokeLater {
+                    Messages.showErrorDialog(
+                        project,
+                        DshBundle.message(
+                            if (cause?.code == BridgeRegistry.REGISTRY_NO_COMPATIBLE) "bridge.install.noCompatible"
+                            else "bridge.install.registryFailed",
+                            probed ?: "",
+                        ),
+                        DshBundle.message("bridge.install.title"),
+                    )
+                }
+                return@executeOnPooledThread
+            }
+            log.info("[install] host dsh=$probed → registry-selected bridge spec: $pkg")
+            install(project, bridge, s, pkg, onInstalled, importProfile)
         }
     }
 
-    private fun promptAndInstall(
+    private fun install(
         project: Project,
         bridge: BridgeManager,
         s: DshSettingsState,
-        probed: String?,
-        suggested: String,
+        pkg: String,
         onInstalled: () -> Unit,
+        importProfile: () -> Unit,
     ) {
-        ApplicationManager.getApplication().invokeLater {
-            val pkg = Messages.showInputDialog(
-                project,
-                DshBundle.message("bridge.install.prompt", probed ?: "(not detected)"),
-                DshBundle.message("bridge.install.title"),
-                null,
-                suggested,
-                null,
-            ) ?: return@invokeLater
-            log.info("[install] starting: dsh=${probed ?: "unknown"}")
-            runScript(buildInstallScript(s.command), 180_000, listOf(pkg), project.basePath).whenComplete { out, error ->
-                ApplicationManager.getApplication().invokeLater {
-                    if (error != null) {
-                        log.warn("[install] failed: ${error.message}")
-                        Messages.showErrorDialog(project, error.message, DshBundle.message("bridge.install.title"))
-                    } else {
-                        // Keep actionable installer notices, not subprocess output dumps.
-                        (out.first.lineSequence() + out.second.lineSequence())
-                            .map { it.trim() }
-                            .filter { it.contains("WARNING", ignoreCase = true) || it.contains("NOTE:") }
-                            .distinct()
-                            .take(10)
-                            .forEach { log.warn("[install] " + it.take(500)) }
-                        log.info("[install] completed: profile=acp-vscode")
-                        s.profile = "acp-vscode"
-                        Messages.showInfoMessage(
+        runScript(buildInstallScript(s.command), 180_000, listOf(pkg), project.basePath).whenComplete { out, error ->
+            ApplicationManager.getApplication().invokeLater {
+                if (error != null) {
+                    log.warn("[install] failed: ${error.message}")
+                    Messages.showErrorDialog(project, error.message, DshBundle.message("bridge.install.title"))
+                } else {
+                    (out.first.lineSequence() + out.second.lineSequence())
+                        .map { it.trim() }
+                        .filter { it.contains("WARNING", ignoreCase = true) || it.contains("NOTE:") }
+                        .distinct()
+                        .take(10)
+                        .forEach { log.warn("[install] " + it.take(500)) }
+                    log.info("[install] completed: profile=acp-vscode")
+                    s.profile = "acp-vscode"
+                    Messages.showInfoMessage(
+                        project,
+                        DshBundle.message("bridge.install.done"),
+                        DshBundle.message("bridge.install.title"),
+                    )
+                    try {
+                        importProfile()
+                    } catch (e: Exception) {
+                        log.warn("[install] profile import could not be opened: ${e.message}")
+                        Messages.showWarningDialog(
                             project,
-                            DshBundle.message("bridge.install.done"),
+                            DshBundle.message("bridge.install.importFailed"),
                             DshBundle.message("bridge.install.title"),
                         )
-                        onInstalled()
-                        bridge.reconnect()
                     }
+                    onInstalled()
+                    bridge.reconnect()
                 }
             }
         }
