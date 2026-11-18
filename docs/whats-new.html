@@ -1,18 +1,31 @@
-<h2>0.2.0 — Subagent sessions and profile-aware bridge setup</h2>
+<h2>0.2.0 — Subagents, faster sessions and profile-aware bridge setup</h2>
 <ul>
-  <li>Browse direct subagent sessions of the active main session and open read-only transcripts
-    without resuming, closing or changing the main conversation. Ordinary history now comes from ACP,
-    with bridge metadata strictly separated from root sessions.</li>
-  <li>Cache root and subagent transcripts independently, share concurrent imports, request root-only
-    temporary exports and clean only bridge-owned temporary files.</li>
-  <li>Review per-session created/modified files through VFS, ACP and final Git-status tracking;
-    open HEAD/current diffs while preserving pre-existing dirt and the last reliable result on Git failures.</li>
-  <li>Select the newest published bridge compatible with the detected host from npm registry metadata.
-    Installation fails closed before profile changes when detection, registry access or compatibility fails.</li>
-  <li>Install only stable workspace/bridge activation rows, then open preview-first model/preset import
-    from any source profile in the same DSH_HOME, with add-only/overwrite policies and reviewed revisions.</li>
-  <li>Retry stale bridge discovery candidates newest-first, distinguish installed-but-disconnected packages
-    in Doctor, and preserve session-specific busy and configuration state during asynchronous work.</li>
+  <li><b>Read-only subagent sessions:</b> browse direct children of the active main session and open
+    their transcripts without resuming, closing or changing the main conversation. The subagent action
+    appears only when the current session actually has direct children.</li>
+  <li><b>Fast, self-refreshing history:</b> ACP owns ordinary session membership while bridge metadata
+    enriches titles and subagents. Initial rows render before slow title requests, visible dialogs update
+    in place, and first-open titles refresh automatically.</li>
+  <li><b>Local session catalog cache:</b> reopen history instantly from the previous snapshot, reuse fresh
+    bridge metadata for 60 seconds, and avoid repeated title lookups. Expired data refreshes in the
+    background without replacing fresh ACP membership with cached roots.</li>
+  <li><b>Reliable session reuse:</b> an untouched blank session survives switches to other history and IDE
+    restarts. Real content, nonempty history or deletion clears the reuse marker; startup archive state is
+    initialized before the first welcome refresh.</li>
+  <li><b>Independent transcript restoration:</b> cache root and subagent transcripts, share concurrent
+    imports, request root-only temporary exports and clean only bridge-owned temporary files.</li>
+  <li><b>Agent change review:</b> track per-session created/modified files through VFS, ACP and final Git
+    status; open HEAD/current diffs while excluding pre-existing dirt and retaining the last reliable
+    result when Git fails.</li>
+  <li><b>Compatible bridge installation:</b> detect the host and select the highest compatible published
+    SemVer from npm registry metadata, preferring stable releases. Detection, registry or compatibility
+    failures stop before any profile mutation.</li>
+  <li><b>Source-profile imports:</b> install only stable workspace/bridge activation rows, then preview
+    model/preset imports from any source profile in the same DSH_HOME with explicit conflict policy,
+    reviewed revisions, host locking, backups and atomic writes.</li>
+  <li><b>Connection and asynchronous-state hardening:</b> retry stale discovery candidates newest-first,
+    distinguish installed-but-disconnected packages in Doctor, and keep busy/configuration state isolated
+    by session during reconnects and rapid switches.</li>
 </ul>
 <h2>0.1.1 — Reliability and Web configuration import</h2>
 <ul>
