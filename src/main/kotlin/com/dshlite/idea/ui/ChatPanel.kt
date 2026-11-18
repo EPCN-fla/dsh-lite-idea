@@ -94,6 +94,7 @@ class ChatPanel(
     private var welcomeSessionsGeneration = 0L
     private var sessionCatalogGeneration = 0L
     private var sessionsDialogRequest: Any? = null
+    private var lastSubagentActionVisible = false
     private var knownSubagents: List<SessionInfoData> = emptyList()
     /** Last successful bridge archive snapshot survives transient refresh errors.
      *  Keep this before init: the initial welcome refresh reads it synchronously. */
@@ -424,6 +425,9 @@ class ChatPanel(
     fun createNewSessionAction() = createNewSession()
     fun openSessionsAction() = openSessions()
     fun openSubagentsAction() = openSubagents()
+    fun hasSubagentsAction(): Boolean =
+        bridge.capabilities?.sessionOrigin == true &&
+            com.dshlite.idea.chat.directSubagents(knownSubagents, sessionId).isNotEmpty()
     fun showSkillsDialogAction() = showSkillsDialog()
     fun exportSessionAction() = exportSession()
     fun importWebConfigAction() = configSyncFlow.run()
@@ -1136,9 +1140,18 @@ class ChatPanel(
     /** Title of the current session (bridge-backed), null until known. */
     private var currentTitle: String? = null
 
+    private fun updateSubagentActionVisibility() {
+        val visible = hasSubagentsAction()
+        if (visible != lastSubagentActionVisible) {
+            lastSubagentActionVisible = visible
+            com.intellij.ide.ActivityTracker.getInstance().inc()
+        }
+    }
+
     /** Title bar: "<status dot> <session name> (<id8>)". Dot: green = acp+bridge,
      *  yellow = acp only, red = neither (mirrors the VS Code header dot). */
     private fun updateTitle() {
+        updateSubagentActionVisibility()
         val acp = service.isReady
         val br = bridge.isOn
         val dot = if (acp && br) "🟢" else if (acp) "🟡" else "🔴"
