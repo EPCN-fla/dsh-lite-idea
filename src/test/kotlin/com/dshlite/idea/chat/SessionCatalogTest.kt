@@ -106,4 +106,29 @@ class SessionCatalogTest {
         assertEquals(listOf("child"), hydrated)
     }
 
+    @Test fun `metadata snapshot is published before slow title hydration finishes`() {
+        val pendingTitle = CompletableFuture<JsonObject?>()
+        val listing = JsonParser.parseString("""{
+            "sessions":[{"sessionId":"root","cwd":"/workspace","title":"From bridge"}],
+            "stored":[{"sessionId":"child","cwd":"/workspace","origin":"subagent","parentSession":"root"}]
+        }""").asJsonObject
+        val snapshots = ArrayList<com.dshlite.idea.chat.SessionGroups>()
+        val result = SessionCatalog({ method, _ ->
+            if (method == "session.list") CompletableFuture.completedFuture(listing) else pendingTitle
+        }, "/workspace").enrich(
+            roots = listOf(SessionInfoData("root", "/workspace", null, null, live = true)),
+            archived = emptySet(),
+            parentSessionId = "root",
+            onMetadata = { snapshots += it },
+        )
+
+        assertEquals(1, snapshots.size)
+        assertEquals("From bridge", snapshots.single().sessions.single().title)
+        assertEquals(listOf("child"), directSubagents(snapshots.single().subagents, "root").map { it.sessionId })
+        assertFalse(result.isDone)
+
+        pendingTitle.complete(JsonObject().apply { addProperty("title", "Child title") })
+        assertEquals("Child title", directSubagents(result.join().subagents, "root").single().title)
+    }
+
 }

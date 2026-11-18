@@ -93,6 +93,7 @@ class ChatPanel(
     private var showingWelcome = true
     private var welcomeSessionsGeneration = 0L
     private var sessionCatalogGeneration = 0L
+    private var sessionsDialogRequest: Any? = null
     private var knownSubagents: List<SessionInfoData> = emptyList()
     /** Last successful bridge archive snapshot survives transient refresh errors.
      *  Keep this before init: the initial welcome refresh reads it synchronously. */
@@ -222,7 +223,7 @@ class ChatPanel(
                 updateTitle()
                 updateStatus(service.state, null)
                 if (state == BridgeState.ON) {
-                    fetchSessionGroups()
+                    refreshSessionCatalog()
                     sessionId?.let { bridgeAttach(it) }
                 } else {
                     knownSubagents = emptyList()
@@ -267,7 +268,7 @@ class ChatPanel(
         override fun onState(state: ConnectionState, detail: String?) {
             onEdt {
                 updateStatus(state, detail)
-                if (state == ConnectionState.READY) fetchSessionGroups()
+                if (state == ConnectionState.READY) refreshSessionCatalog()
             }
         }
     }
@@ -1128,7 +1129,7 @@ class ChatPanel(
             val evicted = recentSessionIds.removeAt(0)
             if (evicted != newId && evicted != busySessionId) runCatching { service.closeSession(evicted) }
         }
-        fetchSessionGroups()
+        refreshSessionCatalog()
         log.info("[dsh] session selected: " + newId.take(8))
     }
 
@@ -1335,13 +1336,15 @@ class ChatPanel(
     private fun loadWelcomeSessions() {
         if (!showingWelcome) return
         val generation = ++welcomeSessionsGeneration
-        fetchSessions().whenComplete { list, err ->
-            onEdt {
-                if (err == null && generation == welcomeSessionsGeneration && showingWelcome) {
-                    welcomePanel.setSessions(list.filter { it.sessionId !in archivedLocal() })
-                }
+        fetchSessionGroups(onSnapshot = { groups ->
+            if (generation == welcomeSessionsGeneration && showingWelcome) {
+                welcomePanel.setSessions(groups.sessions.filter { it.sessionId !in archivedLocal() })
             }
-        }
+        })
+    }
+
+    private fun refreshSessionCatalog() {
+        if (showingWelcome) loadWelcomeSessions() else fetchSessionGroups()
     }
 
     private fun reconnect() {
@@ -1379,17 +1382,39 @@ class ChatPanel(
         }
     }
 
+    private fun publishSessionGroups(
+        generation: Long,
+        groups: com.dshlite.idea.chat.SessionGroups,
+        applySubagents: Boolean,
+        onSnapshot: (com.dshlite.idea.chat.SessionGroups) -> Unit,
+    ) {
+        onEdt {
+            if (generation == sessionCatalogGeneration) {
+                if (applySubagents) knownSubagents = groups.subagents
+                val active = sessionId
+                val title = groups.sessions.firstOrNull { it.sessionId == active }?.title
+                if (!title.isNullOrBlank()) currentTitle = title
+                updateTitle()
+            }
+            // Each surface has its own request generation. A later global
+            // refresh must not discard a dialog that this caller already opened.
+            onSnapshot(groups)
+        }
+    }
+
     /**
-     * ACP is the sole source for ordinary history. The bridge enriches that
-     * exact root set and supplies origin-tagged subagent metadata only.
+     * ACP is the sole source for ordinary history. Publish its rows immediately;
+     * bridge list metadata and slower title lookups arrive as later snapshots.
      */
-    private fun fetchSessionGroups(): java.util.concurrent.CompletableFuture<com.dshlite.idea.chat.SessionGroups> {
+    private fun fetchSessionGroups(
+        onSnapshot: (com.dshlite.idea.chat.SessionGroups) -> Unit = {},
+    ): java.util.concurrent.CompletableFuture<com.dshlite.idea.chat.SessionGroups> {
         val generation = ++sessionCatalogGeneration
         val client = bridge.client?.takeIf { bridge.isOn }
+        val hasOrigin = client != null && bridge.capabilities?.sessionOrigin == true
         val parent = sessionId
         val archivedFuture = archivedForRefresh(client)
-        val rootsFuture = service.listSessions()
-        val result = rootsFuture.thenCombine(archivedFuture) { listed, archived ->
+        fun roots(listed: List<SessionInfoData>, archived: Set<String>): List<SessionInfoData> {
             val rows = LinkedHashMap<String, SessionInfoData>()
             val live = buildList {
                 recentSessionIds.reversed().forEach { add(it) }
@@ -1398,72 +1423,100 @@ class ChatPanel(
             live.forEach { id ->
                 if (id !in archived) rows[id] = SessionInfoData(id, service.workspaceDshCwd(), null, null, live = true)
             }
-            listed.first.forEach { row ->
+            listed.forEach { row ->
                 if (row.sessionId.isNotBlank() && row.sessionId !in archived) rows.putIfAbsent(row.sessionId, row)
             }
-            rows.values.toList() to archived
-        }.thenCompose { (roots, archived) ->
-            if (client == null || bridge.capabilities?.sessionOrigin != true) {
-                knownSubagents = emptyList()
-                java.util.concurrent.CompletableFuture.completedFuture(com.dshlite.idea.chat.SessionGroups(roots, emptyList()))
+            return rows.values.toList()
+        }
+        val acpRoots = service.listSessions().thenApply { listed ->
+            val cachedArchived = archivedLocal().apply { addAll(archivedBridge) }
+            roots(listed.first, cachedArchived)
+        }
+        // Do not let the bounded workspace.list RPC delay the first usable rows.
+        acpRoots.thenAccept { rows ->
+            publishSessionGroups(
+                generation,
+                com.dshlite.idea.chat.SessionGroups(rows, emptyList()),
+                applySubagents = !hasOrigin,
+                onSnapshot,
+            )
+        }
+        val result = acpRoots.thenCombine(archivedFuture) { rows, archived ->
+            rows.filter { it.sessionId !in archived } to archived
+        }.thenCompose { (currentRoots, archived) ->
+            val acpGroups = com.dshlite.idea.chat.SessionGroups(currentRoots, emptyList())
+            publishSessionGroups(generation, acpGroups, applySubagents = !hasOrigin, onSnapshot)
+            if (!hasOrigin) {
+                java.util.concurrent.CompletableFuture.completedFuture(acpGroups)
             } else {
                 com.dshlite.idea.chat.SessionCatalog(
-                    request = { method, params -> client.request(method, params, 15_000) },
+                    request = { method, params -> client!!.request(method, params, 15_000) },
                     workspace = service.workspaceDshCwd(),
                     ignoreCase = com.intellij.openapi.util.SystemInfoRt.isWindows &&
                         com.dshlite.idea.settings.DshSettingsState.getInstance().runtime in setOf("windows", "local"),
-                ).enrich(roots, archived, parent)
+                ).enrich(
+                    currentRoots,
+                    archived,
+                    parent,
+                    onMetadata = { publishSessionGroups(generation, it, applySubagents = true, onSnapshot) },
+                )
             }
         }
         result.whenComplete { groups, error ->
-            if (error == null && groups != null) onEdt {
-                if (generation == sessionCatalogGeneration) {
-                    knownSubagents = groups.subagents
-                    updateTitle()
-                }
+            if (error == null && groups != null) {
+                publishSessionGroups(generation, groups, applySubagents = true, onSnapshot)
             }
         }
         return result
     }
 
-    private fun fetchSessions(): java.util.concurrent.CompletableFuture<List<SessionInfoData>> =
-        fetchSessionGroups().thenApply { it.sessions.filter { row -> row.sessionId !in archivedLocal() } }
-
+    /** Open on the first ACP snapshot; later metadata only updates the visible dialog. */
     private fun openSessions() {
-        fetchSessions().whenComplete { list, error ->
-            onEdt {
-                if (error != null) {
-                    addError(DshBundle.message("chat.listFailed", rootMessage(error)))
-                    return@onEdt
-                }
-                if (list.isEmpty()) {
-                    addSystemMessage(DshBundle.message("chat.noSessions"))
-                    return@onEdt
-                }
-                var refreshGeneration = 0L
-                val dialog = SessionsDialog(project, list, bridgeSessionOps(), currentId = sessionId) { onChanged ->
-                    // Rename/delete landed: refresh the welcome list now, and
-                    // re-list for the dialog after a beat (the host applies the
-                    // archive asynchronously). Only the newest request may apply.
-                    fun refresh() {
-                        val generation = ++refreshGeneration
-                        fetchSessions().whenComplete { fresh, err ->
-                            onEdt {
-                                if (err == null && fresh != null && generation == refreshGeneration) {
-                                    onChanged(fresh.filter { it.sessionId !in archivedLocal() })
-                                }
-                            }
+        val request = Any().also { sessionsDialogRequest = it }
+        var dialog: SessionsDialog? = null
+        var refreshGeneration = 0L
+        val future = fetchSessionGroups(onSnapshot = { groups ->
+            if (sessionsDialogRequest !== request || refreshGeneration != 0L) return@fetchSessionGroups
+            val list = groups.sessions.filter { it.sessionId !in archivedLocal() }
+            dialog?.let {
+                if (it.isShowing) it.updateSessions(list)
+                return@fetchSessionGroups
+            }
+            if (list.isEmpty()) {
+                sessionsDialogRequest = null
+                addSystemMessage(DshBundle.message("chat.noSessions"))
+                return@fetchSessionGroups
+            }
+            val created = SessionsDialog(project, list, bridgeSessionOps(), currentId = sessionId) { onChanged ->
+                // Rename/delete landed: refresh the welcome list now, and re-list
+                // after a beat. Original in-flight snapshots are now obsolete.
+                fun refresh() {
+                    val refresh = ++refreshGeneration
+                    fetchSessionGroups(onSnapshot = { freshGroups ->
+                        if (sessionsDialogRequest === request && refresh == refreshGeneration) {
+                            onChanged(freshGroups.sessions.filter { it.sessionId !in archivedLocal() })
                         }
-                    }
-                    loadWelcomeSessions()
-                    refresh()
-                    Timer(800) {
-                        if (!disposed) refresh()
-                    }.apply { isRepeats = false; start() }
+                    })
                 }
-                if (dialog.showAndGet()) {
-                    val selected = dialog.selected ?: return@onEdt
-                    resume(selected.sessionId, title = selected.title)
+                loadWelcomeSessions()
+                refresh()
+                Timer(800) {
+                    if (!disposed && sessionsDialogRequest === request) refresh()
+                }.apply { isRepeats = false; start() }
+            }
+            dialog = created
+            val accepted = created.showAndGet()
+            if (sessionsDialogRequest === request) sessionsDialogRequest = null
+            if (accepted) {
+                val selected = created.selected ?: return@fetchSessionGroups
+                resume(selected.sessionId, title = selected.title)
+            }
+        })
+        future.whenComplete { _, error ->
+            if (error != null) onEdt {
+                if (sessionsDialogRequest === request && dialog == null) {
+                    sessionsDialogRequest = null
+                    addError(DshBundle.message("chat.listFailed", rootMessage(error)))
                 }
             }
         }

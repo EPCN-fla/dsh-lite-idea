@@ -29,10 +29,14 @@ class SessionCatalog(
         roots: List<SessionInfoData>,
         archived: Set<String>,
         parentSessionId: String?,
+        onMetadata: (SessionGroups) -> Unit = {},
     ): CompletableFuture<SessionGroups> = list(archived).thenCompose { rows ->
         val titles = rows.filter { !it.title.isNullOrBlank() }.associate { it.sessionId to it.title }
         val titledRoots = roots.map { row -> row.copy(title = titles[row.sessionId] ?: row.title) }
         val groups = SessionGroups(titledRoots, partitionSessions(rows).subagents)
+        // Publish cheap list metadata before any session.get deadline can stall
+        // the UI. The returned future completes after background title hydration.
+        onMetadata(groups)
         hydrate(groups, parentSessionId)
     }
 
