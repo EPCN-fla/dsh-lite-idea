@@ -101,6 +101,12 @@ class ChatPanel(
     @Volatile private var archivedBridge: Set<String> = emptySet()
     private val transcriptCache = com.dshlite.idea.chat.SessionTranscriptCache()
     private val sessionCatalogCache = com.dshlite.idea.chat.SessionCatalogCache()
+    private val sessionReuseState by lazy {
+        com.dshlite.idea.chat.SessionReuseState(
+            props().getValue("dsh.lastSessionId"),
+            props().getBoolean("dsh.lastSessionClean", false),
+        )
+    }
     private val recentSessionIds = ArrayList<String>()
     private var subagentRequestSeq = 0L
     private var activeSubagentRequest: com.dshlite.idea.chat.SubagentRequestIdentity? = null
@@ -1048,6 +1054,7 @@ class ChatPanel(
                 }
                 changesTracker.clear(id)
                 sessionCatalogCache.remove(id)
+                markSessionDeleted(id)
                 transcriptCache.remove(id)
                 markArchived(id)
                 f.complete(null)
@@ -1080,8 +1087,7 @@ class ChatPanel(
                     return@onEdt
                 }
                 switchSession(result.sessionId)
-                markSessionUsed(result.sessionId)
-                markSessionClean()
+                markSessionCreated(result.sessionId)
                 applyConfigOptions(result.configOptions)
                 applyRememberedSelection()
             }
@@ -1191,6 +1197,7 @@ class ChatPanel(
         transcriptCache.get(id)?.let { cached ->
             removeHistoryPlaceholder()
             if (cached.isNotEmpty()) renderHistory(cached) else syncCards()
+            markSessionTranscript(id, cached.isEmpty())
             return
         }
         val client = bridge.client?.takeIf { bridge.isOn && bridge.capabilities?.sessionExport == true }
@@ -1239,10 +1246,12 @@ class ChatPanel(
                 val list = messages
                 if (list.isNullOrEmpty()) {
                     if (list == null && failure != null) addSystemMessage(DshBundle.message("chat.historyFailed", rootMessage(failure!!)))
+                    if (list != null) markSessionTranscript(id, importedEmpty = true)
                     syncCards()
                     return@onEdt
                 }
                 renderHistory(list)
+                markSessionTranscript(id, importedEmpty = false)
             }
         }
     }
@@ -1298,23 +1307,27 @@ class ChatPanel(
     /** The last session this panel used, and whether it ever carried content. */
     private fun props() = com.intellij.ide.util.PropertiesComponent.getInstance(project)
 
-    private fun markSessionUsed(id: String) {
-        props().setValue("dsh.lastSessionId", id)
+    private fun persistSessionReuse(snapshot: com.dshlite.idea.chat.SessionReuseSnapshot) {
+        props().setValue("dsh.lastSessionId", snapshot.lastSessionId)
+        // PropertiesComponent omits false: removing the key IS the dirty marker.
+        props().setValue("dsh.lastSessionClean", snapshot.lastSessionClean)
     }
 
-    private fun markSessionClean() {
-        // NOTE: PropertiesComponent omits false from storage — never store
-        // a "clean=false" state; removal IS the dirty marker.
-        props().setValue("dsh.lastSessionClean", true)
-    }
+    private fun markSessionCreated(id: String) = persistSessionReuse(sessionReuseState.created(id))
+
+    private fun markSessionResumed(id: String) = persistSessionReuse(sessionReuseState.resumed(id))
 
     private fun markSessionDirty(id: String) {
-        if (props().getValue("dsh.lastSessionId") == id &&
-            props().getBoolean("dsh.lastSessionClean", false)
-        ) {
-            props().setValue("dsh.lastSessionClean", false) // removes the property
-        }
+        val before = sessionReuseState.snapshot()
+        val after = sessionReuseState.content(id)
+        if (after != before) persistSessionReuse(after)
     }
+
+    private fun markSessionTranscript(id: String, importedEmpty: Boolean) {
+        persistSessionReuse(sessionReuseState.transcript(id, importedEmpty, entries.isNotEmpty()))
+    }
+
+    private fun markSessionDeleted(id: String) = persistSessionReuse(sessionReuseState.deleted(id))
 
     /**
      * Boot the agent and create a session in the background so the composer rail
@@ -1325,9 +1338,8 @@ class ChatPanel(
         if (sessionId != null || busy) return
         // VS Code parity: an untouched empty session is reused instead of
         // stacking a fresh empty one on every launch.
-        val lastId = props().getValue("dsh.lastSessionId")
-        val clean = props().getBoolean("dsh.lastSessionClean", false)
-        if (lastId != null && clean) {
+        val lastId = sessionReuseState.startupBlankSessionId()
+        if (lastId != null) {
             resume(lastId, quiet = true)
             return
         }
@@ -1340,8 +1352,7 @@ class ChatPanel(
                 attachSession(result.sessionId)
                 currentTitle = null
                 bridgeAttach(result.sessionId)
-                markSessionUsed(result.sessionId)
-                markSessionClean()
+                markSessionCreated(result.sessionId)
                 updateTitle()
                 applyConfigOptions(result.configOptions)
                 applyRememberedSelection()
@@ -1651,10 +1662,9 @@ class ChatPanel(
                     return@onEdt
                 }
                 switchSession(id, title)
-                markSessionUsed(id)
-                // A previous blank session's clean flag must never transfer
-                // to an imported nonempty session on the next IDE startup.
-                if (!quiet) markSessionDirty(id)
+                // Switching preserves other blank identities; an actually
+                // nonempty transcript below will still clear this flag.
+                markSessionResumed(id)
                 if (!quiet) {
                     historyPlaceholder = Entry(SystemMessageRow(DshBundle.message("chat.historyLoading"))).also(::addEntry)
                     loadTranscript(id)
@@ -1775,8 +1785,7 @@ class ChatPanel(
                     }
                     sessionRequest = null
                     switchSession(result.sessionId)
-                    markSessionUsed(result.sessionId)
-                    markSessionClean()
+                    markSessionCreated(result.sessionId)
                     applyConfigOptions(result.configOptions)
                     applyRememberedSelection()
                     ready.complete(result.sessionId)
