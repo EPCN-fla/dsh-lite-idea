@@ -270,6 +270,13 @@ class ChatPanel(
     }
 
     private var updateListener: AcpService.UpdateListener? = null
+    private val changesTracker: com.dshlite.idea.chat.ChangedFilesTracker =
+        com.dshlite.idea.chat.ChangedFilesTracker(project) { id, files ->
+            onEdt { if (sessionId == id) changesBar.setFiles(files) }
+        }
+    private val changesBar: ChangesBar = ChangesBar { file: com.dshlite.idea.chat.ChangedFile ->
+        changesTracker.openDiff(file)
+    }
     private var sessionEpoch = 0L
     /** The latest explicit or startup request; older completions are ignored. */
     private var sessionRequest: Any? = null
@@ -380,6 +387,7 @@ class ChatPanel(
         }
 
         val south = JPanel(BorderLayout())
+        south.add(changesBar, BorderLayout.NORTH)
         south.add(composerPanel, BorderLayout.CENTER)
 
         centerCards.add(welcomePanel, "welcome")
@@ -1024,8 +1032,10 @@ class ChatPanel(
                         currentTitle = null
                         clearEntries()
                         updateTitle()
+                        changesBar.setFiles(emptyList())
                     }
                 }
+                changesTracker.clear(id)
                 transcriptCache.remove(id)
                 markArchived(id)
                 f.complete(null)
@@ -1072,6 +1082,8 @@ class ChatPanel(
     private fun attachSession(newId: String) {
         updateListener?.let(service::removeUpdateListener)
         sessionId = newId
+        changesTracker.startSession(newId)
+        changesBar.setFiles(changesTracker.filesFor(newId))
         activeSubagentRequest = null
         subagentRequestSeq++
         subagentTranscriptDialog?.takeIf { it.isShowing }?.close(0)
@@ -1079,6 +1091,7 @@ class ChatPanel(
         val epoch = ++sessionEpoch
         val listener = object : AcpService.UpdateListener {
             override fun onUpdate(update: SessionUpdateData) {
+                changesTracker.ingestUpdate(newId, update)
                 onEdt {
                     if (sessionEpoch == epoch && sessionId == newId) applyUpdate(update)
                 }
@@ -1709,9 +1722,11 @@ class ChatPanel(
                     }
                 }
                 blocks.add(ContentBlock.text(text))
+                changesTracker.promptStarted(id)
                 service.prompt(id, blocks)
             }
             .whenComplete { _, error ->
+                turnSessionId?.let(changesTracker::promptSettled)
                 onEdt {
                     if (sessionRequest === creationRequest) sessionRequest = null
                     if (sessionId == turnSessionId || turnSessionId == null) setBusy(false)
@@ -2203,6 +2218,7 @@ class ChatPanel(
         updateListener?.let(service::removeUpdateListener)
         service.removeStateListener(stateListener)
         bridge.removeListener(bridgeListener)
+        changesTracker.dispose()
         bridgeAttachExecutor.shutdownNow()
         if (service.permissionResponder != null) service.permissionResponder = null
     }
