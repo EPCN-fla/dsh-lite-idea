@@ -94,6 +94,9 @@ class ChatPanel(
     private var welcomeSessionsGeneration = 0L
     private var sessionCatalogGeneration = 0L
     private var knownSubagents: List<SessionInfoData> = emptyList()
+    /** Last successful bridge archive snapshot survives transient refresh errors.
+     *  Keep this before init: the initial welcome refresh reads it synchronously. */
+    @Volatile private var archivedBridge: Set<String> = emptySet()
     private val transcriptCache = com.dshlite.idea.chat.SessionTranscriptCache()
     private val recentSessionIds = ArrayList<String>()
     private var subagentRequestSeq = 0L
@@ -1359,9 +1362,6 @@ class ChatPanel(
         com.intellij.ide.util.PropertiesComponent.getInstance(project)
             .setValue("dsh.archivedSessionIds", set.joinToString(","))
     }
-
-    /** Last successful bridge archive snapshot survives transient refresh errors. */
-    @Volatile private var archivedBridge: Set<String> = emptySet()
 
     private fun archivedForRefresh(client: com.dshlite.idea.bridge.BridgeClient?): java.util.concurrent.CompletableFuture<Set<String>> {
         val archived = archivedLocal().toMutableSet()
