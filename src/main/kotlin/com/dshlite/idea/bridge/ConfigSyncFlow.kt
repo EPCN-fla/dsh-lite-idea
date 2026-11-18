@@ -1,6 +1,6 @@
 /**
  * Explicit, preview-first source-profile -> active bridge profile import.
- * Only identifiers cross the UI; RPC error messages may contain configuration
+ * Only identifiers cross the UI; transport error messages may contain configuration
  * excerpts and are therefore never displayed by this flow.
  */
 package com.dshlite.idea.bridge

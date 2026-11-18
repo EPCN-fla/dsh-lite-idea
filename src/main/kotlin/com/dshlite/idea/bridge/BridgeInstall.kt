@@ -1,17 +1,17 @@
 /**
  * One-shot bridge installer/repairer, ported from dsh-lite-vscode
- * src/bridge/install.ts + installScript.ts. The bash template and the
- * cordis.patch.yml variants are vendored as resources. The patch variants
- * remain byte-identical to the VS Code sources; the install script additionally
- * reapplies the requested package spec so Repair also upgrades an older bridge.
+ * src/bridge/install.ts + installScript.ts. Registry metadata selects an exact
+ * compatible package before any profile mutation. The minimal bash template owns
+ * only the ACP bundle and stable workspace/bridge activation rows; model/preset
+ * rows come from the subsequent preview-first source-profile import.
  * Only __COMMAND__ is interpolated at run time; the package spec is passed as
  * a literal positional argument so shell substitution is never re-evaluated.
  *
  * Steps (all idempotent, executed by the script on the target side):
  *   1. create the acp-vscode profile from the acp template if missing
  *   2. ensure @deepseek-ai/dsh-acp-app is in the profile bundles
- *   3. write/repair cordis.patch.yml per the host dsh version
- *   4. install the bridge package into the profile
+ *   3. install/repair the registry-selected bridge package
+ *   4. atomically add only missing workspace/bridge activation rows
  */
 package com.dshlite.idea.bridge
 
