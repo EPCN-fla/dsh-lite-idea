@@ -10,15 +10,20 @@ Claude Code and Codex integrations. Sibling of [dsh-lite-vscode](https://github.
 
 - **Chat tool window** (pure Swing) with GFM tables/strikethrough, collapsible thoughts and tool cards,
   themed code blocks, copy icons, and larger consistent text in the transcript and composer
-- **Session management** — list / resume / rename / delete (rename & delete need the bridge plugin);
+- **Session management** — ACP-paginated list / resume / rename / delete (rename & delete need the bridge plugin);
   restored transcripts include reasoning and tool results, and the history dialog preselects the current session
+- **Read-only subagent sessions** — browse direct children of the active main session, including live/stored
+  state, and open their transcripts without ACP resume, closing the main session, or changing its composer
 - **Model, reasoning-effort, agent-preset, and permission-mode pickers** in the config bar
 - **Slash command palette** — typing `/` opens a filtered picker over local actions
   (`/new`, `/model`, `/effort`, `/permission`, `/export`), native dsh commands, and skills
 - **Skill catalog** — browse the bridge skill list, insert `/<skill>` into the composer
 - **Session log export** as ZIP, with reveal-in-folder / copy-path actions
-- **Web configuration import** — preview and explicitly import models and agent presets into the active ACP profile (bridge ≥ 0.4.0)
+- **Profile configuration import** — choose any source profile in the same DSH_HOME, then preview and
+  explicitly import models and agent presets into the active ACP profile (bridge ≥ 0.4.0 for the connected command)
 - **Permission prompts** as modal dialogs; **cancel** interrupts a running turn
+- **Change review** — per-session created/modified file lists combine VFS, ACP diff and final Git status;
+  expand the bar above the composer to open a HEAD/current diff without losing pre-existing workspace dirt
 - **Plan / todo rendering** and a live context-usage meter
 - Cross-environment: run dsh in WSL, natively on Windows, or same-side on Linux/macOS
   (see [Topologies](#topologies))
@@ -29,7 +34,7 @@ Claude Code and Codex integrations. Sibling of [dsh-lite-vscode](https://github.
 - **Node.js ≥ 22.19** on the side where dsh runs (nvm/volta/mise/asdf are picked up automatically)
 - **DeepSeek Harness** — installed (`npm i -g @deepseek-ai/dsh`), used via `npx`, or from a repository checkout
 - **dsh-vscode-bridge** dsh plugin (**required** for titles, delete, presets, permission modes,
-  workspace grouping, native slash commands, skill catalog, session export, and Web configuration import) — the toolbar
+  workspace grouping, native slash commands, skill catalog, session export, subagent catalogs, and profile configuration import) — the toolbar
   **Install Bridge** button wires it in (creates the default `acp-vscode` profile, registers the
   service rows, installs the plugin). Profile `acp` runs bridge-less with chat-only features.
 
@@ -37,18 +42,19 @@ Claude Code and Codex integrations. Sibling of [dsh-lite-vscode](https://github.
 
 | dsh-lite-idea | DeepSeek Harness | dsh-vscode-bridge |
 |---|---|---|
-| **0.1.0 – 0.1.1** | 0.2.1-rc.x | ≥ 0.4.0 |
-| **0.1.0 – 0.1.1** | 0.2.0-rc.x | ≥ 0.4.0 |
-| **0.1.0 – 0.1.1** | 0.1.7-rc.x | ≥ 0.4.0 |
-| **0.1.0 – 0.1.1** | 0.1.5-rc.2 | 0.1.3 – 0.2.x (bridge 0.3.0 dropped 0.1.5 — the installer pre-fills `dsh-vscode-bridge@^0.2.0` there) |
+| **0.2.0** | Tested 0.1.5 / 0.1.7 / 0.2.0 / 0.2.1-rc.x / 0.2.2-rc.1–rc.3 cohorts | Selected exactly from published compatibility metadata; subagent sessions require `sessionOrigin` + `sessionExport` (bridge 0.5.1+) |
+| **0.1.0 – 0.1.1** | 0.1.5–0.2.1-rc.x | 0.1.3–0.4.x, using the former fixed host mapping |
 
-The table lists recommended pairings; existing features still work with older bridges, while Web
-configuration import requires bridge 0.4.0+ advertising `configSync`. The version corridor matches
-dsh-lite-vscode: the vendored `cordis.patch.yml` variants remain byte-identical to its sources. The
-installer probes the host `dsh --version`, picks the patch variant for that cohort, migrates profiles
-written by older installers (drops the stale `dsh-agent-presets` row, adds the declarative
-`agent-preset-registry` + preset declarations), and reapplies the confirmed package spec so Repair
-can upgrade an older bridge.
+Install/Repair first detects the host dsh version, then queries the configured npm registry for both
+modern `dshCompatibility` matrices and legacy development-dependency ranges. It picks the highest
+compatible SemVer, preferring stable releases, and never falls back to a guessed package line.
+Unknown hosts, malformed/unavailable registry responses and no-compatible results stop **before**
+any profile mutation. Repair always forwards the selected exact package spec so upgrades are not skipped.
+
+The installer writes only the ACP bundle plus the stable `workspace` and `dsh-vscode-bridge` activation
+rows. It no longer snapshots preset/model/permission packages into `cordis.patch.yml`; after installation,
+the source-profile import flow supplies those user-selected rows. Node.js 22.19 remains the baseline,
+but a registry-selected bridge may require a newer runtime (bridge 0.5.x requires Node.js 24.9+).
 
 ## Quick start
 
@@ -58,8 +64,9 @@ can upgrade an older bridge.
    then open *Settings → Plugins → ⚙ → Install Plugin from Disk*. For a local build, use
    `build/distributions/dsh-lite-idea-*.zip`; developers can use `./gradlew runIde` for a sandbox.
 2. Open *Settings → Tools → DSH Lite*: pick where dsh runs and how to launch it.
-3. Click **Install Bridge** (download icon) in the DSH tool window toolbar: creates the default
-   `acp-vscode` dsh profile, wires the services, and installs the bridge plugin.
+3. Click **Install Bridge** in the DSH tool window: detects the host, installs the latest compatible
+   bridge and creates/repairs the default `acp-vscode` profile with only stable activation rows.
+   Then choose a source profile (default `web`) and review the model/preset import preview.
 4. Open the **DSH** tool window on the right — press **+** or just type a prompt.
 
 ## Settings
@@ -91,27 +98,33 @@ Discovery backs off when no bridge is found. TCP connects to `127.0.0.1` (WSL2 l
 | Action | What it does |
 |---|---|
 | **＋ New Session** | Start a fresh session |
-| **🕘 Sessions** | List / resume / rename / delete past sessions for this workspace |
+| **🕘 Sessions** | List / resume / rename / delete past root sessions for this workspace |
+| **Subagents** | Refresh and open a direct child of the current main session as a read-only transcript |
 | **★ Skills** | Browse the bridge skill catalog; pick one to insert `/<name>` into the composer |
 | **⤴ Export** | Export the current session log as ZIP (bridge `session.exportZip`) |
-| **Import Models and Presets from Web** | Preview and import Web configuration into the connected ACP profile (bridge ≥ 0.4.0) |
+| **Import Models and Presets from Profile** | Choose a source profile, preview and import into the connected ACP profile (bridge ≥ 0.4.0) |
 | **⟳ Reconnect** | Restart the dsh ACP process |
 | **⬇ Install Bridge** | Idempotent bridge installer/repairer on the target side |
 | **ⓘ Doctor** | Probe node/dsh availability **on the dsh side**, and report the bridge connection with its host dsh version |
 
-## Import Web configuration
+## Import Profile configuration
 
-Run **Import Models and Presets from Web** in the DSH tool-window gear menu. The connected bridge
-must advertise `configSync` (bridge 0.4.0+). Choose models, presets, or both, then choose whether
-same-name target entries are kept (default) or replaced. The confirmation shows only identifiers:
-source/target profiles, providers, presets, supporting service rows, and skipped entries.
+Run **Import Models and Presets from Profile** in the DSH tool-window gear menu. Enter any source
+profile directory name in the same DSH_HOME (default `web`); paths and reserved names are rejected,
+and a missing source stops before preview. The normal connected command requires bridge `configSync`
+(0.4.0+), while the post-install flow runs on the DSH host and therefore works before the new bridge
+has reconnected.
 
-Cancellation and an unchanged preview write nothing. Import sends the exact reviewed options and
-preview revision; stale previews, timeouts and disconnects are never retried automatically. A write
-timeout has an uncertain result, so inspect the target profile and backups before previewing again.
-After a successful import, finish active turns and use **Reconnect**. Existing sessions are not
-switched automatically. Environment variables, OAuth/credential stores and third-party packages
-are not copied.
+Choose models, presets, or both, then whether same-name target entries are kept (default) or replaced.
+The host-side preview shows only identifiers: source/target profiles, providers, presets, supporting
+service rows and skipped entries. Configuration bytes and credentials stay on the DSH host.
+
+Cancellation and an unchanged preview write nothing. Import uses the exact reviewed source/options/
+revision, with host locking, backups and atomic replacement; stale previews, timeouts and disconnects
+are never retried automatically. A write timeout has an uncertain result, so inspect the target profile
+and backups before previewing again. After a successful import, finish active turns and use **Reconnect**.
+Existing sessions are not switched automatically. Environment variables, OAuth/credential stores and
+third-party packages are not copied.
 
 ## Troubleshooting
 
@@ -133,9 +146,8 @@ remains available for on-demand diagnostics.
 - **"profile "acp-vscode" does not exist"** → the default profile is created by the bridge
   installer; click Install Bridge.
 - **Custom models gone after a dsh 0.1.7 upgrade** → 0.1.7 made model providers per-profile;
-  use **Import Models and Presets from Web** with bridge 0.4.0+, or copy the `llm-pi-ai` section
-  from `settings.yaml.imported` into the profile's `cordis.patch.yml` (the installer prints this
-  hint when it detects the migration).
+  use **Import Models and Presets from Profile**, or copy the `llm-pi-ai` section from
+  `settings.yaml.imported` into the profile's `cordis.patch.yml`.
 
 ## Development
 
@@ -152,12 +164,12 @@ Machine-specific `org.gradle.java.home` overrides belong in your user-level
 ```
 src/main/kotlin/com/dshlite/idea/
   acp/       ACP wire models + ndjson JSON-RPC client + per-project AcpService
-  bridge/    dsh-vscode-bridge TCP client + discovery/manager + installer
-  chat/      durable history import, session catalog, tool text and session-id validation
+  bridge/    bridge TCP client + discovery + registry install + host-side profile import
+  chat/      ACP-first catalogs, subagent classification, transcript cache/import and change tracking
   launcher/  WSL/Windows/Local process launch + path mapping + shell bootstrap
   settings/  Persistent settings + configurable page
   ui/        ChatPanel (Swing), slash palette, skills/sessions dialogs, permission broker, markdown view
-src/main/resources/bridge/  vendored cordis.patch.yml variants + install script template
+src/main/resources/bridge/  minimal install template + generated host-side profile-import helper
 ```
 
 ## Publishing
@@ -184,7 +196,7 @@ For subsequent releases, configure the following under **Settings → Secrets an
 | Variable | `JETBRAINS_PUBLISH` | `true` |
 
 Update `pluginVersion` in `gradle.properties` and the matching `<h2>version — title</h2>` heading
-in What's New, commit the changes, and push a matching tag (for example, `v0.1.1`).
+in What's New, commit the changes, and push a matching tag (for example, `v0.2.0`).
 Enable automatic publishing starting with the version after the initial manual upload to avoid
 uploading the same version twice. Marketplace uploads remain subject to JetBrains review.
 

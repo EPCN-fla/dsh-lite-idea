@@ -1,3 +1,19 @@
+<h2>0.2.0 — Subagent sessions and profile-aware bridge setup</h2>
+<ul>
+  <li>Browse direct subagent sessions of the active main session and open read-only transcripts
+    without resuming, closing or changing the main conversation. Ordinary history now comes from ACP,
+    with bridge metadata strictly separated from root sessions.</li>
+  <li>Cache root and subagent transcripts independently, share concurrent imports, request root-only
+    temporary exports and clean only bridge-owned temporary files.</li>
+  <li>Review per-session created/modified files through VFS, ACP and final Git-status tracking;
+    open HEAD/current diffs while preserving pre-existing dirt and the last reliable result on Git failures.</li>
+  <li>Select the newest published bridge compatible with the detected host from npm registry metadata.
+    Installation fails closed before profile changes when detection, registry access or compatibility fails.</li>
+  <li>Install only stable workspace/bridge activation rows, then open preview-first model/preset import
+    from any source profile in the same DSH_HOME, with add-only/overwrite policies and reviewed revisions.</li>
+  <li>Retry stale bridge discovery candidates newest-first, distinguish installed-but-disconnected packages
+    in Doctor, and preserve session-specific busy and configuration state during asynchronous work.</li>
+</ul>
 <h2>0.1.1 — Reliability and Web configuration import</h2>
 <ul>
   <li>Preview and explicitly import models and agent presets from the Web configuration with

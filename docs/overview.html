@@ -6,18 +6,24 @@ without leaving the editor.</p>
 
 <h2>Features</h2>
 <ul>
+  <li><b>Subagent sessions:</b> inspect direct-child transcripts read-only without changing the active
+    main session; ACP owns ordinary history while bridge metadata stays origin-aware.</li>
   <li><b>Streaming chat:</b> Markdown replies with tables, code blocks and copy actions;
     collapsible reasoning and tool-call cards; plan/todo display and a context-usage meter.</li>
   <li><b>Project sessions:</b> create, list and resume conversations, restore reasoning and tool results,
     rename or delete sessions, and export session logs as ZIP.</li>
   <li><b>Agent controls:</b> choose a model, reasoning effort, agent preset and permission mode;
     review permission requests in native dialogs and cancel a running turn.</li>
+  <li><b>Change review:</b> inspect per-session created/modified files in a HEAD/current diff,
+    with pre-existing workspace changes excluded from the agent's final result.</li>
   <li><b>Commands and context:</b> type / for local actions, native dsh commands and skills;
     browse the skill catalog or use @ to reference project files.</li>
   <li><b>Flexible runtime:</b> run dsh locally on Linux/macOS, in WSL from a Windows IDE,
     or natively on Windows, with automatic Windows/WSL path mapping.</li>
-  <li><b>Setup and diagnostics:</b> install or repair the dsh bridge from the toolbar and
-    use Doctor to check the agent runtime and bridge connection.</li>
+  <li><b>Profile import:</b> preview model and agent-preset imports from any source profile in the
+    same DSH_HOME, with explicit conflict policy, revision checks and host-side backups.</li>
+  <li><b>Setup and diagnostics:</b> select a compatible bridge from npm registry metadata, install or
+    repair it from the toolbar, and use Doctor to check runtime, discovery and installation state.</li>
   <li><b>English and Simplified Chinese</b> interface resources.</li>
 </ul>
 
@@ -31,7 +37,7 @@ without leaving the editor.</p>
   <li>A model provider configured in dsh, including any credentials required by that provider.
     The IDE plugin does not include a model service or API credits.</li>
   <li>The <b>dsh-vscode-bridge</b> dsh plugin enables session titles/deletion, agent presets,
-    permission modes, workspace grouping, native commands, skills and log export.
+    permission modes, workspace grouping, native commands, skills, subagent catalogs and log export.
     See the <a href="https://github.com/EPCN-fla/dsh-lite-idea#version-matching">version compatibility table</a>
     before choosing dsh and bridge versions.</li>
 </ul>
@@ -39,9 +45,10 @@ without leaving the editor.</p>
 <h2>Getting started</h2>
 <ol>
   <li>Open <b>Settings → Tools → DSH Lite for JetBrains IDE</b> and choose the runtime and dsh command.</li>
-  <li>Open the <b>DSH</b> tool window and click <b>Install Bridge</b> to create or repair the default
-    <code>acp-vscode</code> profile. The installer requires Linux, macOS or WSL;
-    native Windows users must configure the bridge separately.</li>
+  <li>Open the <b>DSH</b> tool window and click <b>Install Bridge</b> to select a compatible release
+    and create or repair the default <code>acp-vscode</code> profile. Review the optional source-profile
+    import after installation. The installer requires Linux, macOS or WSL; native Windows users must
+    configure the bridge separately.</li>
   <li>Configure your model provider and credentials in dsh. <b>Extra environment</b> is plain-text IDE state, not a credential store.</li>
   <li>Start a new session or type a prompt. Use <b>Doctor</b> if the agent does not connect.</li>
 </ol>
