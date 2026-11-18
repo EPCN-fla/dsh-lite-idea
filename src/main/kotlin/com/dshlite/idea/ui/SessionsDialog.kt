@@ -121,7 +121,7 @@ class SessionsDialog(
                             if (idx >= 0) model.set(idx, sel.copy(title = newTitle))
                             list.repaint()
 
-                            onChanged { fresh -> replaceAll(fresh) }
+                            onChanged { fresh -> updateSessions(fresh) }
                         }
                     }, com.intellij.openapi.application.ModalityState.any())
                 }
@@ -149,7 +149,7 @@ class SessionsDialog(
                             select(null)
                             list.repaint()
 
-                            onChanged { fresh -> replaceAll(fresh) }
+                            onChanged { fresh -> updateSessions(fresh) }
                         }
                     }, com.intellij.openapi.application.ModalityState.any())
                 }
@@ -160,7 +160,7 @@ class SessionsDialog(
         return arrayOf(rename, delete)
     }
 
-    private fun replaceAll(fresh: List<SessionInfoData>) {
+    fun updateSessions(fresh: List<SessionInfoData>) {
         if (project.isDisposed || !isShowing) return
         val keep = list.selectedValue?.sessionId
         model.clear()

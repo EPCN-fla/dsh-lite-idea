@@ -1,11 +1,12 @@
 /**
- * Explicit, preview-first Web -> active bridge profile import (bridge >= 0.4.0).
- * Only identifiers cross the UI; RPC error messages may contain configuration
+ * Explicit, preview-first source-profile -> active bridge profile import.
+ * Only identifiers cross the UI; transport error messages may contain configuration
  * excerpts and are therefore never displayed by this flow.
  */
 package com.dshlite.idea.bridge
 
 import com.dshlite.idea.DshBundle
+import com.dshlite.idea.settings.DshSettingsState
 import com.google.gson.JsonObject
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -79,6 +80,7 @@ internal interface ConfigSyncConnection {
 }
 
 internal interface ConfigSyncInteractions {
+    fun chooseSource(target: String): String?
     fun chooseScope(): ConfigSyncOptions?
     fun chooseOverwrite(): Boolean?
     fun confirm(preview: String): Boolean
@@ -89,8 +91,10 @@ internal interface ConfigSyncInteractions {
 
 internal class ConfigSyncFlow(
     private val connection: ConfigSyncConnection,
+    private val transport: ConfigSyncTransport,
     private val ui: ConfigSyncInteractions,
     private val onEdt: (() -> Unit) -> Unit,
+    private val targetProfile: () -> String,
     private val onImported: (ConfigSyncSummary) -> Unit = {},
 ) {
     constructor(
@@ -103,65 +107,107 @@ internal class ConfigSyncFlow(
             override val client: ConfigSyncRpc? get() = bridge.client
             override fun reconnect() = bridge.reconnect()
         },
+        transport = HostConfigSyncTransport(project),
         ui = IdeaConfigSyncInteractions(project),
         onEdt = { block ->
             ApplicationManager.getApplication().invokeLater({
                 if (!project.isDisposed) block()
             }, ModalityState.any())
         },
+        targetProfile = { DshSettingsState.getInstance().profile },
         onImported = onImported,
     )
 
     @Volatile private var running = false
 
-    fun run() {
+    fun run(requireBridge: Boolean = true) {
         if (running) {
             ui.info(DshBundle.message("configSync.alreadyOpen"))
             return
         }
         running = true
         val client = connection.client
-        if (!connection.isOn || client == null) {
+        if (requireBridge && (!connection.isOn || client == null)) {
             connection.reconnect()
             ui.warning(DshBundle.message("configSync.noBridge"))
             finish()
             return
         }
-        if (client.capabilities?.configSync != true) {
+        if (requireBridge && client?.capabilities?.configSync != true) {
             ui.warning(DshBundle.message("configSync.unsupported"))
             finish()
+            return
+        }
+        val target = targetProfile()
+        val source = ui.chooseSource(target)?.trim() ?: run { finish(); return }
+        validateProfileName(source)?.let {
+            ui.warning(it)
+            finish()
+            return
+        }
+        if (!stillConnected(client, target, requireBridge)) {
+            fail(IllegalStateException("bridge changed"))
+            return
+        }
+        val request = try {
+            transport.probeSource(source)
+        } catch (e: Exception) {
+            fail(e)
+            return
+        }
+        request.whenComplete { exists, error ->
+            onEdt {
+                if (error != null) {
+                    fail(error)
+                    return@onEdt
+                }
+                if (exists != true) {
+                    ui.warning(DshBundle.message("configSync.sourceMissing", source))
+                    finish()
+                    return@onEdt
+                }
+                chooseOptions(client, target, source, requireBridge)
+            }
+        }
+    }
+
+    private fun chooseOptions(
+        client: ConfigSyncRpc?,
+        target: String,
+        source: String,
+        requireBridge: Boolean,
+    ) {
+        if (!stillConnected(client, target, requireBridge)) {
+            fail(IllegalStateException("bridge changed"))
             return
         }
         val scope = ui.chooseScope() ?: run { finish(); return }
         val overwrite = ui.chooseOverwrite() ?: run { finish(); return }
         val options = scope.copy(overwrite = overwrite)
-        if (!stillConnected(client)) {
-            fail(IllegalStateException("bridge changed"))
-            return
-        }
         val request = try {
-            client.request("config.preview", options.params(), PREVIEW_TIMEOUT_MS)
+            transport.preview(source, target, options)
         } catch (e: Exception) {
             fail(e)
             return
         }
         request.whenComplete { result, error ->
-            onEdt { handlePreview(client, options, result, error) }
+            onEdt { handlePreview(client, target, source, requireBridge, options, result, error) }
         }
     }
 
     private fun handlePreview(
-        client: ConfigSyncRpc,
+        client: ConfigSyncRpc?,
+        target: String,
+        source: String,
+        requireBridge: Boolean,
         options: ConfigSyncOptions,
-        result: JsonObject?,
+        result: ConfigSyncSummary?,
         error: Throwable?,
     ) {
         if (error != null) { fail(error); return }
-        if (!stillConnected(client)) { fail(IllegalStateException("bridge changed")); return }
-        val preview = try {
-            ConfigSyncSummary.from(result ?: throw IllegalArgumentException("missing preview"))
-        } catch (e: Exception) {
-            fail(e)
+        if (!stillConnected(client, target, requireBridge)) { fail(IllegalStateException("bridge changed")); return }
+        val preview = result ?: run {
+            fail(IllegalArgumentException("missing preview"))
             return
         }
         val detail = configSyncPreviewText(preview, options)
@@ -171,10 +217,9 @@ internal class ConfigSyncFlow(
             return
         }
         if (!ui.confirm(detail)) { finish(); return }
-        // Never apply a reviewed revision to a replacement bridge instance.
-        if (!stillConnected(client)) { fail(IllegalStateException("bridge changed")); return }
+        if (!stillConnected(client, target, requireBridge)) { fail(IllegalStateException("bridge changed")); return }
         val request = try {
-            client.request("config.import", options.params(preview.revision), IMPORT_TIMEOUT_MS)
+            transport.import(source, target, options, preview.revision)
         } catch (e: Exception) {
             fail(e)
             return
@@ -184,15 +229,14 @@ internal class ConfigSyncFlow(
         }
     }
 
-    private fun handleImport(result: JsonObject?, error: Throwable?) {
+    private fun handleImport(result: ConfigSyncSummary?, error: Throwable?) {
         if (error != null) { fail(error); return }
-        val imported = try {
-            ConfigSyncSummary.from(result ?: throw IllegalArgumentException("missing import result"))
-        } catch (e: Exception) {
-            fail(e)
+        val imported = result ?: run {
+            fail(IllegalArgumentException("missing import result"))
             return
         }
         val detail = buildList {
+            add(DshBundle.message("configSync.result.source", imported.source))
             add(DshBundle.message("configSync.result.target", imported.target))
             imported.backupPath?.let { add(DshBundle.message("configSync.result.backup", it)) }
             if (imported.restartRequired) add(DshBundle.message("configSync.result.restart"))
@@ -206,8 +250,8 @@ internal class ConfigSyncFlow(
         finish()
     }
 
-    private fun stillConnected(client: ConfigSyncRpc): Boolean =
-        connection.isOn && connection.client === client
+    private fun stillConnected(client: ConfigSyncRpc?, target: String, requireBridge: Boolean): Boolean =
+        targetProfile() == target && (!requireBridge || (connection.isOn && connection.client === client))
 
     private fun fail(error: Throwable) {
         ui.error(configSyncErrorText(error))
@@ -225,6 +269,15 @@ internal class ConfigSyncFlow(
 }
 
 private class IdeaConfigSyncInteractions(private val project: Project) : ConfigSyncInteractions {
+    override fun chooseSource(target: String): String? = Messages.showInputDialog(
+        project,
+        DshBundle.message("configSync.source.prompt", target),
+        DshBundle.message("chat.importWebConfig"),
+        null,
+        "web",
+        null,
+    )
+
     override fun chooseScope(): ConfigSyncOptions? {
         val choices = arrayOf(
             DshBundle.message("configSync.scope.all"),
@@ -284,6 +337,14 @@ private class IdeaConfigSyncInteractions(private val project: Project) : ConfigS
     }
 }
 
+/** DSH accepts simple directory names, not paths or its dependency sentinel. */
+internal fun validateProfileName(value: String): String? {
+    val name = value.trim()
+    return if (name.isEmpty() || name == "." || name == ".." || name == "node_modules" ||
+        name.any { it == '/' || it == '\\' || it == '\u0000' }
+    ) DshBundle.message("configSync.source.invalid") else null
+}
+
 internal fun configSyncPreviewText(summary: ConfigSyncSummary, options: ConfigSyncOptions): String {
     fun list(key: String, values: List<String>): String = DshBundle.message(
         key,
@@ -310,8 +371,16 @@ internal fun configSyncErrorText(error: Throwable): String {
             else -> null
         }
     }.filterIsInstance<BridgeException>().firstOrNull()
-    val key = when (cause?.dataCode) {
+    val profileError = generateSequence(error) {
+        when (it) {
+            is CompletionException, is ExecutionException -> it.cause
+            else -> null
+        }
+    }.filterIsInstance<ProfileImportException>().firstOrNull()
+    val code = cause?.dataCode ?: profileError?.code
+    val key = when (code) {
         "config/stale-preview" -> "configSync.error.stale"
+        "config/node-unavailable" -> "configSync.error.nodeUnavailable"
         "config/import-busy" -> "configSync.error.busy"
         "config/unavailable", "service-unavailable" -> "configSync.error.unavailable"
         "config/same-profile" -> "configSync.error.sameProfile"

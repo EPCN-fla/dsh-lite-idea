@@ -174,8 +174,12 @@ class AcpService(private val project: Project) : Disposable {
             fun page(cursor: String?): CompletableFuture<Pair<List<SessionInfoData>, String?>> =
                 active.listSessions(cwd, cursor).thenCompose { (sessions, next) ->
                     sessions.filter { it.sessionId.isNotBlank() }.forEach { rows[it.sessionId] = it }
-                    if (next != null && cursors.add(next)) page(next)
-                    else CompletableFuture.completedFuture(rows.values.toList() to null)
+                    if (next != null && cursors.contains(next)) {
+                        CompletableFuture.failedFuture(AcpException("ACP session/list returned a repeated cursor"))
+                    } else if (next != null) {
+                        cursors.add(next)
+                        page(next)
+                    } else CompletableFuture.completedFuture(rows.values.toList() to null)
                 }
             page(null)
         }

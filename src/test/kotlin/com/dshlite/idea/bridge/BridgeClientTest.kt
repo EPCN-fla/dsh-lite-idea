@@ -17,7 +17,7 @@ class BridgeClientTest {
                 try {
                     val socket = server.accept()
                     val request = JsonParser.parseString(socket.getInputStream().bufferedReader().readLine()).asJsonObject
-                    val response = """{"id":${request.get("id")},"result":{"capabilities":{"configSync":true}}}""" + "\n"
+                    val response = """{"id":${request.get("id")},"result":{"capabilities":{"configSync":true,"sessionOrigin":true}}}""" + "\n"
                     socket.getOutputStream().write(response.toByteArray(Charsets.UTF_8))
                     peer.complete(socket)
                 } catch (e: Exception) { peer.completeExceptionally(e) }
@@ -34,8 +34,9 @@ class BridgeClientTest {
         assertTrue(e.cause is BridgeException)
     }
 
-    @Test fun `handshake parses config sync capability`() = withPeer { client, _ ->
+    @Test fun `handshake parses config sync and session origin capabilities`() = withPeer { client, _ ->
         assertTrue(client.capabilities?.configSync == true)
+        assertTrue(client.capabilities?.sessionOrigin == true)
     }
 
     @Test fun `deadline rejects silent RPC without blocking subsequent requests`() = withPeer { client, socket ->

@@ -183,9 +183,27 @@ data class PermissionRequestData(
 
 /* --------------------------- misc responses -------------------------- */
 
-data class SessionInfoData(val sessionId: String, val cwd: String?, val title: String?, val updatedAt: String?) {
+data class SessionInfoData(
+    val sessionId: String,
+    val cwd: String?,
+    val title: String?,
+    val updatedAt: String?,
+    val createdAt: Long? = null,
+    val live: Boolean = false,
+    val origin: String? = null,
+    val parentSession: String? = null,
+) {
     companion object {
-        fun parse(o: JsonObject) = SessionInfoData(o.str("sessionId") ?: "", o.str("cwd"), o.str("title"), o.str("updatedAt"))
+        fun parse(o: JsonObject) = SessionInfoData(
+            sessionId = o.str("sessionId") ?: "",
+            cwd = o.str("cwd"),
+            title = o.str("title"),
+            updatedAt = o.str("updatedAt"),
+            createdAt = o.get("createdAt")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asLong,
+            live = o.get("live")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }?.asBoolean ?: false,
+            origin = o.str("origin"),
+            parentSession = o.str("parentSession"),
+        )
     }
 }
 

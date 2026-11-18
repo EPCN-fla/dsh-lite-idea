@@ -56,6 +56,42 @@ internal class BridgeBackoff {
     }
 }
 
+/** startedAt is epoch millis in early bridge versions, ISO-8601 text in newer ones. */
+internal fun parseBridgeStartedAt(el: com.google.gson.JsonElement?): Long? {
+    val p = el as? com.google.gson.JsonPrimitive ?: return null
+    return when {
+        p.isNumber -> p.asLong
+        p.isString -> runCatching { java.time.Instant.parse(p.asString).toEpochMilli() }.getOrNull()
+        else -> null
+    }
+}
+
+/**
+ * Rank every instance serving dshCwd (already in dsh-side path form), newest first.
+ * Keeping all matches lets reconnect fall through stale discovery files.
+ */
+internal fun rankBridgeEntries(
+    entries: List<BridgeDiscoveryEntry>,
+    dshCwd: String,
+    caseInsensitive: Boolean,
+): List<BridgeDiscoveryEntry> {
+    fun norm(p: String): String {
+        val n = p.trimEnd('/', '\\')
+        return if (caseInsensitive) n.lowercase() else n
+    }
+    val want = norm(dshCwd)
+    return entries.filter { e -> e.directories.any { norm(it) == want } }
+        .sortedByDescending { it.startedAt ?: 0 }
+}
+
+/** Try candidates in order until one handshake succeeds; exposed for stale-entry tests. */
+internal inline fun <T> firstSuccessfulCandidate(candidates: List<T>, attempt: (T) -> Boolean): T? {
+    for (candidate in candidates) {
+        if (attempt(candidate)) return candidate
+    }
+    return null
+}
+
 @Service(Service.Level.PROJECT)
 class BridgeManager(private val project: Project) : Disposable {
 
@@ -205,33 +241,12 @@ class BridgeManager(private val project: Project) : Disposable {
             port = port,
             token = token,
             pid = o.get("pid")?.takeIf { it.isJsonPrimitive }?.asInt ?: 0,
-            startedAt = parseStartedAt(o.get("startedAt")),
+            startedAt = parseBridgeStartedAt(o.get("startedAt")),
             dshVersion = o.get("dshVersion")?.takeIf { it.isJsonPrimitive }?.asString,
             directories = dirs,
         )
     }
 
-    /** startedAt is epoch millis in early bridge versions, ISO-8601 text in newer ones. */
-    private fun parseStartedAt(el: com.google.gson.JsonElement?): Long? {
-        val p = el as? com.google.gson.JsonPrimitive ?: return null
-        return when {
-            p.isNumber -> p.asLong
-            p.isString -> runCatching { java.time.Instant.parse(p.asString).toEpochMilli() }.getOrNull()
-            else -> null
-        }
-    }
-
-    /** Pick the instance serving dshCwd (dsh-side path form); newest startedAt wins. */
-    private fun pickEntry(entries: List<BridgeDiscoveryEntry>, dshCwd: String): BridgeDiscoveryEntry? {
-        val ci = SystemInfoRt.isWindows && settings().runtime in setOf("windows", "local")
-        fun norm(p: String): String {
-            val n = p.trimEnd('/', '\\')
-            return if (ci) n.lowercase() else n
-        }
-        val want = norm(dshCwd)
-        return entries.filter { e -> e.directories.any { norm(it) == want } }
-            .maxByOrNull { it.startedAt ?: 0 }
-    }
 
     // ---------- connect ----------
 
@@ -264,18 +279,36 @@ class BridgeManager(private val project: Project) : Disposable {
         }
         val dshCwd = createLauncher(settings(), basePath).toDshPath(basePath)
         val (discInfo, entries) = readDiscoveryEntries()
-        val entry = pickEntry(entries, dshCwd)
-        if (entry == null) {
+        val ci = SystemInfoRt.isWindows && settings().runtime in setOf("windows", "local")
+        val candidates = rankBridgeEntries(entries, dshCwd, ci)
+        if (candidates.isEmpty()) {
             lastDiscoveryInfo = discInfo + " want=" + dshCwd + " (no match)"
             backoff.miss()
             teardown("no bridge entry for this workspace")
             return
         }
+
+        // A previous process can leave a stale discovery file behind. Try every
+        // matching candidate newest-first instead of declaring the bridge absent
+        // when only the first candidate fails its handshake.
+        val connected = firstSuccessfulCandidate(candidates) { entry ->
+            if (disposed || project.isDisposed) return
+            connectEntry(entry, discInfo)
+        }
+        if (connected == null) {
+            // Count one failed discovery round, not one backoff step per stale file.
+            backoff.miss()
+            lastDiscoveryInfo = discInfo + " want=" + dshCwd + " (all ${candidates.size} candidates failed)"
+        }
+    }
+
+    /** Return true only for a usable existing or newly connected client. */
+    private fun connectEntry(entry: BridgeDiscoveryEntry, discInfo: String): Boolean {
         lastDiscoveryInfo = discInfo + " picked pid=" + entry.pid + " port=" + entry.port
         val current = client
         if (current != null && current.isOpen && connectedPid == entry.pid) {
             backoff.success()
-            return
+            return true
         }
 
         fireState(BridgeState.CONNECTING)
@@ -294,7 +327,7 @@ class BridgeManager(private val project: Project) : Disposable {
                 holder[0] = c
                 if (disposed || project.isDisposed || !c.isOpen) {
                     c.close()
-                    return
+                    return false
                 }
                 current?.close()
                 client = c
@@ -303,11 +336,12 @@ class BridgeManager(private val project: Project) : Disposable {
                 log.info("[bridge] connected pid=${entry.pid} v${c.handshake?.version} dsh=${hostDshVersion ?: "unknown"}")
                 backoff.success()
                 fireState(BridgeState.ON)
+                return true
             }
         } catch (e: Exception) {
             log.warn("[bridge] connect pid=${entry.pid} failed: ${e.message}")
-            backoff.miss()
             teardown("connect failed")
+            return false
         }
     }
 
